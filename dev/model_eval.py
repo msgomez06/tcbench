@@ -270,7 +270,9 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(
+        args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
+    )
     result_dir = args.result_dir
 
     # Check for GPU availability

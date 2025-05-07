@@ -47,6 +47,7 @@ if __name__ == "__main__":
         sys.argv = [
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
             "--ai_model",
+            # "panguweather",
             "fourcastnetv2",
             # "--overwrite_cache",
             # "--min_leadtime",
@@ -55,7 +56,7 @@ if __name__ == "__main__":
             # "24",
             # "--use_gpu",
             # "--verbose",
-            # "--reanalysis",
+            "--reanalysis",
             "--mode",
             "probabilistic",
             "--cache_dir",
@@ -222,7 +223,9 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(
+        args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
+    )
     result_dir = args.result_dir
 
     # Check for GPU availability
@@ -370,6 +373,12 @@ if __name__ == "__main__":
         ]
     ).T
     # %%
+    # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
+    nan_idxs = np.isnan(valid_x).any(axis=1)
+    valid_x = valid_x[~nan_idxs]
+    valid_target = valid_target[~nan_idxs]
+
+    # %%
     #  Dataloader & Hyperparameters
 
     # Let's define some hyperparameters
@@ -418,7 +427,7 @@ if __name__ == "__main__":
     # if emulate:
     #     input("Press Enter to continue...")
     #  Model
-    # We begin by instantiating our baseline model
+    # # We begin by instantiating our baseline model
     # MLR = baselines.TorchMLRv2(
     #     deterministic=True if args.mode == "deterministic" else False,
     #     num_scalars=train_x.shape[1],
@@ -435,7 +444,7 @@ if __name__ == "__main__":
     #     optimizer, base_lr=1e-5, max_lr=1e-3, step_size_up=10
     # )
 
-    num_epochs = 20
+    num_epochs = 30
     patience = 3  # stop if validation loss increases for patience epochs
     bias_threshold = 10  # stop if validation loss / train loss > bias_threshold
 

@@ -248,7 +248,9 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(
+        args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
+    )
     result_dir = args.result_dir
 
     # Check for GPU availability
@@ -303,9 +305,13 @@ if __name__ == "__main__":
 
     if args.dask_array:
         # Load the data from the zarr store using dask array
-        train_data = da.from_zarr(zarr_store, component="train/masked_AIX")
+        if args.mask:
+            train_data = da.from_zarr(zarr_store, component="train/masked_AIX")
+            valid_data = da.from_zarr(zarr_store, component="validation/masked_AIX")
+        else:
+            train_data = da.from_zarr(zarr_store, component="train/AIX_scaled")
+            valid_data = da.from_zarr(zarr_store, component="validation/AIX_scaled")
         train_target = da.from_zarr(zarr_store, component="train/target_scaled")
-        valid_data = da.from_zarr(zarr_store, component="validation/masked_AIX")
         valid_target = da.from_zarr(zarr_store, component="validation/target_scaled")
         train_leadtimes = da.from_zarr(zarr_store, component="train/leadtime_scaled")
         validation_leadtimes = da.from_zarr(
@@ -327,9 +333,13 @@ if __name__ == "__main__":
         )
     else:
         # load data with zarr
-        train_data = train_zarr["masked_AIX"]
+        if args.mask:
+            train_data = train_zarr["masked_AIX"]
+            valid_data = valid_zarr["masked_AIX"]
+        else:
+            train_data = train_zarr["AIX_scaled"]
+            valid_data = valid_zarr["AIX_scaled"]
         train_target = train_zarr["target_scaled"]
-        valid_data = valid_zarr["masked_AIX"]
         valid_target = valid_zarr["target_scaled"]
         train_leadtimes = train_zarr["leadtime_scaled"]
         validation_leadtimes = valid_zarr["leadtime_scaled"]
@@ -344,7 +354,7 @@ if __name__ == "__main__":
     #  Dataloader & Hyperparameters
 
     # Let's define some hyperparameters
-    batch_size = 64
+    batch_size = 32
 
     # If the mode is not deterministic, we'll set the loss to CRPS
     if args.mode != "deterministic":
@@ -415,6 +425,8 @@ if __name__ == "__main__":
         modelClass = baselines.SimpleCNN
     elif args.algorithm == "UNet":
         modelClass = baselines.UNet
+    elif args.algorithm == "UNetv2":
+        modelClass = baselines.UNet_v2
     else:
         raise ValueError("Model not recognized.")
 

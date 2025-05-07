@@ -33,7 +33,6 @@ from matplotlib.collections import PolyCollection
 from mpl_toolkits.mplot3d.axes3d import Axes3D
 import matplotlib as mpl
 from matplotlib.animation import FuncAnimation
-from memory_profiler import profile
 from datetime import datetime
 import dask.array as da
 import pickle
@@ -3238,7 +3237,7 @@ class AI:
 
                 if outstamps is None:
                     try:
-                        ##TODO: The following check appears to be and issue
+                        ##TODO: The following check appears to be an issue
                         ## with the way the data is being filtered when processing
                         ## the storm fields. My guess is that this is due to the
                         ## crossing of the 0° longitude line. This should be fixed

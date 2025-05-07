@@ -43,8 +43,8 @@ if __name__ == "__main__":
     if emulate:
         sys.argv = [
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
-            "--ai_model",
-            "fourcastnetv2",
+            # "--ai_model",
+            # "fourcastnetv2",
             "--overwrite_cache",
             # "--min_leadtime",
             # "6",
@@ -52,7 +52,7 @@ if __name__ == "__main__":
             # "24",
             # "--use_gpu",
             # "--verbose",
-            # "--reanalysis",
+            "--reanalysis",
             "--cache_dir",
             "/scratch/mgomezd1/cache",
             "--mask",
@@ -215,7 +215,9 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(
+        args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
+    )
     result_dir = args.result_dir
 
     num_cores = int(subprocess.check_output(["nproc"], text=True).strip())
@@ -235,7 +237,7 @@ if __name__ == "__main__":
             {
                 "train": years[:-2],
                 "validation": years[-2:],
-                # "test": [2020],
+                "test": [2020],
             },
             datadir=datadir,
             test_strategy="custom",
@@ -251,7 +253,7 @@ if __name__ == "__main__":
             {
                 "train": years[:-2],
                 "validation": years[-2:],
-                # "test": [2020],
+                "test": [2020],
             },
             datadir=datadir,
             test_strategy="custom",
@@ -277,10 +279,17 @@ if __name__ == "__main__":
     )
     validation_ldt_mask = np.squeeze(validation_ldt_mask.compute(scheduler="threads"))
 
+    test_ldt_mask = da.logical_and(
+        data["test"]["leadtime"] >= args.min_leadtime,
+        data["test"]["leadtime"] <= args.max_leadtime,
+    )
+    test_ldt_mask = np.squeeze(test_ldt_mask.compute(scheduler="threads"))
+
     # Let's filter the data using leadtimes
     print("Filtering data...", flush=True)
     train_data = data["train"]["inputs"][train_ldt_mask]
     valid_data = data["validation"]["inputs"][validation_ldt_mask]
+    test_data = data["test"]["inputs"][test_ldt_mask]
     # and the columns to ablate
     ablate_cols = json.loads(args.ablate_cols)
 
@@ -297,10 +306,17 @@ if __name__ == "__main__":
             :,
             :,
         ]
+        test_data = test_data[
+            :,
+            [i for i in range(test_data.shape[1]) if i not in ablate_cols],
+            :,
+            :,
+        ]
 
     if args.magAngle_mode:
         train_data = mlf.uv_to_magAngle(train_data, u_idx=0, v_idx=1)
         valid_data = mlf.uv_to_magAngle(valid_data, u_idx=0, v_idx=1)
+        test_data = mlf.uv_to_magAngle(test_data, u_idx=0, v_idx=1)
 
     # We will want to normalize the inputs for the model
     # to work properly. We will use the AI_StandardScaler for this
@@ -353,6 +369,7 @@ if __name__ == "__main__":
     valid_positions = mlf.latlon_to_sincos(
         data["validation"]["base_position"][validation_ldt_mask]
     )
+    test_positions = mlf.latlon_to_sincos(data["test"]["base_position"][test_ldt_mask])
 
     # We'll encode the leadtime by dividing it by the max leadtime in the dataset
     # which is 168 hours
@@ -362,10 +379,12 @@ if __name__ == "__main__":
     validation_leadtimes = (
         data["validation"]["leadtime"][validation_ldt_mask] / max_train_ldt
     )
+    test_leadtimes = data["test"]["leadtime"][test_ldt_mask] / max_train_ldt
 
     if args.raw_target:
         train_target = data["train"]["outputs"][train_ldt_mask]
         valid_target = data["validation"]["outputs"][validation_ldt_mask]
+        test_target = data["test"]["outputs"][test_ldt_mask]
     else:
         # We also want to precalculate the delta intensity for the
         # training and validation sets
@@ -377,6 +396,10 @@ if __name__ == "__main__":
         valid_target = (
             data["validation"]["outputs"][validation_ldt_mask]
             - data["validation"]["base_intensity"][validation_ldt_mask]
+        )
+        test_target = (
+            data["test"]["outputs"][test_ldt_mask]
+            - data["test"]["base_intensity"][test_ldt_mask]
         )
 
     # %%
@@ -395,13 +418,17 @@ if __name__ == "__main__":
         root.create_group("train")
     if "validation" not in root:
         root.create_group("validation")
+    if "test" not in root:
+        root.create_group("test")
 
     # Check if the data is already stored in the cache
     train_zarr = root["train"]
     valid_zarr = root["validation"]
+    test_zarr = root["test"]
 
     train_arrays = list(train_zarr.array_keys())
     valid_arrays = list(valid_zarr.array_keys())
+    test_arrays = list(test_zarr.array_keys())
     # %%
     # Handle the AI and target data in the zarr store
     found = np.all(
@@ -410,6 +437,8 @@ if __name__ == "__main__":
             "target" in train_arrays,
             "AIX" in valid_arrays,
             "target" in valid_arrays,
+            "AIX" in test_arrays,
+            "target" in test_arrays,
         ]
     )
 
@@ -441,6 +470,16 @@ if __name__ == "__main__":
             )
         ).to_zarr(zarr_store, component="validation/target", overwrite=True)
         print("Validation target stored in cache...", flush=True)
+        test_data.rechunk((1000, -1, -1, -1)).to_zarr(
+            zarr_store,
+            component="test/AIX",
+            overwrite=True,
+        )
+        print("Test data stored in cache...", flush=True)
+        test_target.rechunk((1000, -1, -1)).to_zarr(
+            zarr_store, component="test/target", overwrite=True
+        )
+        print("Test target stored in cache...", flush=True)
     # %%
     # Load the data from the zarr store
     train_data = da.from_zarr(
@@ -451,6 +490,10 @@ if __name__ == "__main__":
         zarr_store, component="validation/AIX", chunks=(1000, -1, -1, -1)
     )
     valid_target = da.from_zarr(zarr_store, component="validation/target")
+    test_data = da.from_zarr(
+        zarr_store, component="test/AIX", chunks=(1000, -1, -1, -1)
+    )
+    test_target = da.from_zarr(zarr_store, component="test/target")
 
     # %%
     # %%
@@ -475,13 +518,15 @@ if __name__ == "__main__":
             pickle.dump(target_scaler, f)
 
     # %% Scaling AI Outputs
-    print("Preparing scaled data...", flush=True)
+    print("Preparing scaled data... ", end="", flush=True)
     found = np.all(
         [
             "train/AIX_scaled" in train_arrays,
             "validation/AIX_scaled" in valid_arrays,
+            "test/AIX_scaled" in test_arrays,
             "train/target_scaled" in train_arrays,
             "validation/target_scaled" in valid_arrays,
+            "test/target_scaled" in test_arrays,
         ]
     )
 
@@ -500,6 +545,13 @@ if __name__ == "__main__":
             dtype=valid_data.dtype,
             chunks=valid_data.chunks,
         )
+        test_data = da.map_blocks(
+            transform_data,
+            test_data,
+            AI_scaler,
+            dtype=test_data.dtype,
+            chunks=test_data.chunks,
+        )
         train_target = da.map_blocks(
             transform_data,
             train_target,
@@ -514,19 +566,33 @@ if __name__ == "__main__":
             dtype=valid_target.dtype,
             chunks=valid_target.chunks,
         )
+        test_target = da.map_blocks(
+            transform_data,
+            test_target,
+            target_scaler,
+            dtype=test_target.dtype,
+            chunks=test_target.chunks,
+        )
 
-    train_data.astype(np.float16).to_zarr(
-        zarr_store, component="train/AIX_scaled", overwrite=True
-    )
-    valid_data.astype(np.float16).to_zarr(
-        zarr_store, component="validation/AIX_scaled", overwrite=True
-    )
-    train_target.astype(np.float16).to_zarr(
-        zarr_store, component="train/target_scaled", overwrite=True
-    )
-    valid_target.astype(np.float16).to_zarr(
-        zarr_store, component="validation/target_scaled", overwrite=True
-    )
+        train_data.astype(np.float16).to_zarr(
+            zarr_store, component="train/AIX_scaled", overwrite=True
+        )
+        valid_data.astype(np.float16).to_zarr(
+            zarr_store, component="validation/AIX_scaled", overwrite=True
+        )
+        test_data.astype(np.float16).to_zarr(
+            zarr_store, component="test/AIX_scaled", overwrite=True
+        )
+        train_target.astype(np.float16).to_zarr(
+            zarr_store, component="train/target_scaled", overwrite=True
+        )
+        valid_target.astype(np.float16).to_zarr(
+            zarr_store, component="validation/target_scaled", overwrite=True
+        )
+        test_target.astype(np.float16).to_zarr(
+            zarr_store, component="test/target_scaled", overwrite=True
+        )
+    print("Done!", flush=True)
 
     # %%
     # Handle masking in the zarr store if necessary
@@ -534,8 +600,10 @@ if __name__ == "__main__":
         [
             "masked_AIX" in train_arrays,
             "masked_AIX" in valid_arrays,
+            "masked_AIX" in test_arrays,
             "train/mask" in train_arrays,
             "validation/mask" in valid_arrays,
+            "test/mask" in test_arrays,
         ]
     )
 
@@ -560,6 +628,13 @@ if __name__ == "__main__":
             path="validation/mask",
             overwrite=True,
         )
+        test_mask = zr.ones(
+            (test_data.shape[0], 1, 241, 241),
+            chunks=(1000, 1, 241, 241),
+            store=zarr_store,
+            path="test/mask",
+            overwrite=True,
+        )
 
         for lead in unique_leads:
             radial_mask = mask_dict[lead]
@@ -570,8 +645,10 @@ if __name__ == "__main__":
             temp_ldt_mask_valid = (
                 (data["validation"]["leadtime"] == lead).compute().squeeze()
             )
+            temp_ldt_mask_test = (data["test"]["leadtime"] == lead).compute().squeeze()
             temp_ldt_mask_train = np.nonzero(temp_ldt_mask_train)[0]
             temp_ldt_mask_valid = np.nonzero(temp_ldt_mask_valid)[0]
+            temp_ldt_mask_test = np.nonzero(temp_ldt_mask_test)[0]
 
             train_mask[temp_ldt_mask_train, 0, :, :] = (
                 train_mask[temp_ldt_mask_train, 0, :, :] * radial_mask
@@ -579,12 +656,20 @@ if __name__ == "__main__":
             valid_mask[temp_ldt_mask_valid, 0, :, :] = (
                 valid_mask[temp_ldt_mask_valid, 0, :, :] * radial_mask
             )
+            test_mask[temp_ldt_mask_test, 0, :, :] = (
+                test_mask[temp_ldt_mask_test, 0, :, :] * radial_mask
+            )
+            print(".", end="", flush=True)
+        print("Done!", flush=True)
 
         train_mask = da.from_zarr(
             zarr_store, component="train/mask", chunks=(1000, -1, -1, -1)
         )
         valid_mask = da.from_zarr(
             zarr_store, component="validation/mask", chunks=(1000, -1, -1, -1)
+        )
+        test_mask = da.from_zarr(
+            zarr_store, component="test/mask", chunks=(1000, -1, -1, -1)
         )
 
         # Function to apply the mask to each block of images
@@ -606,11 +691,19 @@ if __name__ == "__main__":
             dtype=np.float16,  # valid_data.dtype,
             chunks=valid_data.chunks,
         )
+        masked_test = da.map_blocks(
+            apply_mask,
+            test_data,
+            test_mask,
+            dtype=np.float16,  # test_data.dtype,
+            chunks=test_data.chunks,
+        )
 
         masked_train.to_zarr(zarr_store, component="train/masked_AIX", overwrite=True)
         masked_valid.to_zarr(
             zarr_store, component="validation/masked_AIX", overwrite=True
         )
+        masked_test.to_zarr(zarr_store, component="test/masked_AIX", overwrite=True)
 
         # Load the data from the zarr store
         train_data = da.from_zarr(
@@ -619,6 +712,9 @@ if __name__ == "__main__":
         valid_data = da.from_zarr(
             zarr_store, component="validation/masked_AIX", chunks=(1000, -1, -1, -1)
         )
+        test_data = da.from_zarr(
+            zarr_store, component="test/masked_AIX", chunks=(1000, -1, -1, -1)
+        )
     elif args.mask and found:
         train_data = da.from_zarr(
             zarr_store, component="train/masked_AIX", chunks=(1000, -1, -1, -1)
@@ -626,12 +722,16 @@ if __name__ == "__main__":
         valid_data = da.from_zarr(
             zarr_store, component="validation/masked_AIX", chunks=(1000, -1, -1, -1)
         )
+        test_data = da.from_zarr(
+            zarr_store, component="test/masked_AIX", chunks=(1000, -1, -1, -1)
+        )
     # %%
     # handle the leadtime in the zarr store
     found = np.all(
         [
             "train/leadtime" in train_arrays,
             "validation/leadtime" in valid_arrays,
+            "test/leadtime" in test_arrays,
         ]
     )
 
@@ -642,11 +742,17 @@ if __name__ == "__main__":
         data["validation"]["leadtime"][validation_ldt_mask].rechunk((1000, -1)).to_zarr(
             zarr_store, component="validation/leadtime", overwrite=True
         )
+        data["test"]["leadtime"][test_ldt_mask].rechunk((1000, -1)).to_zarr(
+            zarr_store, component="test/leadtime", overwrite=True
+        )
         train_leadtimes.rechunk((1000, -1)).to_zarr(
             zarr_store, component="train/leadtime_scaled", overwrite=True
         )
         validation_leadtimes.rechunk((1000, -1)).to_zarr(
             zarr_store, component="validation/leadtime_scaled", overwrite=True
+        )
+        test_leadtimes.rechunk((1000, -1)).to_zarr(
+            zarr_store, component="test/leadtime_scaled", overwrite=True
         )
 
     # Load the data from the zarr store
@@ -654,6 +760,7 @@ if __name__ == "__main__":
     validation_leadtimes = da.from_zarr(
         zarr_store, component="validation/leadtime_scaled"
     )
+    test_leadtimes = da.from_zarr(zarr_store, component="test/leadtime_scaled")
 
     print("Preparing base intensity and position...", flush=True)
     # handle the base intensity and position in the zarr store
@@ -661,8 +768,10 @@ if __name__ == "__main__":
         [
             "train/base_intensity" in train_arrays,
             "validation/base_intensity" in valid_arrays,
+            "test/base_intensity" in test_arrays,
             "train/base_position" in train_arrays,
             "validation/base_position" in valid_arrays,
+            "test/base_position" in test_arrays,
         ]
     )
 
@@ -673,11 +782,17 @@ if __name__ == "__main__":
         data["validation"]["base_intensity"][validation_ldt_mask].rechunk(
             (1000, -1, -1)
         ).to_zarr(zarr_store, component="validation/base_intensity", overwrite=True)
+        data["test"]["base_intensity"][test_ldt_mask].rechunk((1000, -1, -1)).to_zarr(
+            zarr_store, component="test/base_intensity", overwrite=True
+        )
         train_positions.rechunk((1000, -1)).to_zarr(
             zarr_store, component="train/base_position", overwrite=True
         )
         valid_positions.rechunk((1000, -1)).to_zarr(
             zarr_store, component="validation/base_position", overwrite=True
+        )
+        test_positions.rechunk((1000, -1)).to_zarr(
+            zarr_store, component="test/base_position", overwrite=True
         )
 
     # Load the data from the zarr store
@@ -685,8 +800,10 @@ if __name__ == "__main__":
     valid_base_intensity = da.from_zarr(
         zarr_store, component="validation/base_intensity"
     )
+    test_base_intensity = da.from_zarr(zarr_store, component="test/base_intensity")
     train_base_position = da.from_zarr(zarr_store, component="train/base_position")
     valid_base_position = da.from_zarr(zarr_store, component="validation/base_position")
+    test_base_position = da.from_zarr(zarr_store, component="test/base_position")
 
     print("Preparing scaled base intensity...", flush=True)
     found = np.all(
@@ -714,6 +831,13 @@ if __name__ == "__main__":
         ).to_zarr(
             zarr_store, component="validation/base_intensity_scaled", overwrite=True
         )
+        da.map_blocks(
+            transform_data,
+            test_base_intensity,
+            base_scaler,
+            dtype=test_base_intensity.dtype,
+            chunks=test_base_intensity.chunks,
+        ).to_zarr(zarr_store, component="test/base_intensity_scaled", overwrite=True)
 
     # Load the data from the zarr store
     train_base_intensity = da.from_zarr(
@@ -721,6 +845,9 @@ if __name__ == "__main__":
     )
     valid_base_intensity = da.from_zarr(
         zarr_store, component="validation/base_intensity_scaled"
+    )
+    test_base_intensity = da.from_zarr(
+        zarr_store, component="test/base_intensity_scaled"
     )
 
 # %%

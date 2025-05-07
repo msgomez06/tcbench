@@ -14,6 +14,7 @@ import torch
 import dask
 import multiprocessing
 import json
+import zarr as zr
 
 # from dask import optimize
 import time
@@ -29,6 +30,13 @@ import metrics, baselines
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error
 import argparse
 
+
+# Function to Normalize the data and targets
+def transform_data(data, scaler):
+    return scaler.transform(data)
+
+
+# %%
 if __name__ == "__main__":
     # emulate system arguments
     emulate = True
@@ -36,12 +44,26 @@ if __name__ == "__main__":
     if emulate:
         sys.argv = [
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
-            "--ai_model",
-            "panguweather",
-            "--overwrite_cache",
+            # "--ai_model",
+            # "fourcastnetv2",
+            # "--overwrite_cache",
+            # "--min_leadtime",
+            # "6",
+            # "--max_leadtime",
+            # "24",
+            # "--use_gpu",
             # "--verbose",
+            # "--reanalysis",
+            "--cache_dir",
+            "/scratch/mgomezd1/cache",
+            # "/srv/scratch/mgomezd1/cache",
+            "--mask",
             "--magAngle_mode",
+            "--dask_array",
         ]
+    # check if the context has been set for torch multiprocessing
+    if torch.multiprocessing.get_start_method() != "spawn":
+        torch.multiprocessing.set_start_method("spawn", force=True)
 
     # Read in arguments with argparse
     parser = argparse.ArgumentParser(description="Train a CNN model")
@@ -128,7 +150,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.25,
+        default=0.5,
     )
 
     parser.add_argument(
@@ -155,13 +177,67 @@ if __name__ == "__main__":
         help="Whether to use intensity instead of intensification",
     )
 
+    parser.add_argument(
+        "--reanalysis",
+        action="store_true",
+        help="Whether to use reanalysis data instead of forecast data",
+    )
+
+    parser.add_argument(
+        "--mask",
+        action="store_true",
+        help="Whether to apply a leadtime driven mask to the data",
+    )
+
+    parser.add_argument(
+        "--mask_path",
+        type=str,
+        default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/mask_dict.pkl",
+    )
+
+    parser.add_argument(
+        "--mask_type",
+        type=str,
+        default="linear",
+    )
+
+    parser.add_argument(
+        "--aux_loss",
+        action="store_true",
+        help="Whether to use an auxiliary loss",
+    )
+
+    parser.add_argument(
+        "--dask_array",
+        action="store_true",
+        help="Whether to use dask arrays for the dataset",
+    )
+
+    parser.add_argument(
+        "--search",
+        action="store_true",
+        help="Whether to perform a hyperparameter search",
+    )
+
+    parser.add_argument(
+        "--algorithm",
+        type=str,
+        default="CNN",
+    )
+
+    parser.add_argument(
+        "--l1_reg",
+        type=float,
+        default=0.0,
+    )
+
     args = parser.parse_args()
 
     print("Imports successful", flush=True)
 
-    # check if the context has been set for torch multiprocessing
-    if not torch.multiprocessing.get_start_method(allow_none=True) == "spawn":
-        torch.multiprocessing.set_start_method("spawn")
+    # print the multiprocessing start method
+    print(torch.multiprocessing.get_start_method(allow_none=True))
+    dask.config.set(scheduler="processes")
 
     #  Setup
     datadir = args.datadir
@@ -176,242 +252,207 @@ if __name__ == "__main__":
 
     num_cores = int(subprocess.check_output(["nproc"], text=True).strip())
 
-    #  Data Loading
-    rng = np.random.default_rng(seed=2020)
+    # %%
+    # Check if the cache directory includes a zarray store for the data
+    zarr_path = os.path.join(cache_dir, "zarray_store")
+    if not os.path.exists(zarr_path):
+        os.makedirs(zarr_path)
+    zarr_store = zr.DirectoryStore(zarr_path)
 
-    years = list(range(2013, 2020))
-    rng.shuffle(years)
+    # Check if the root group exists, if not create it
+    root = zr.group(zarr_store)
+    root = zr.open_group(zarr_path)
 
-    # Make the cache directory if it doesn't exist
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
+    # Check that the training and validation groups exist, if not create them
+    if "train" not in root:
+        root.create_group("train")
+    if "validation" not in root:
+        root.create_group("validation")
 
-    print("Loading datasets...", flush=True)
-    sets, data = toolbox.get_ai_sets(
-        {
-            "train": years[:-2],
-            "validation": years[-2:],
-            # "test": [2020],
-        },
-        datadir=datadir,
-        test_strategy="custom",
-        base_position=True,
-        ai_model=args.ai_model,
-        cache_dir=cache_dir,
-        # use_cached=not args.overwrite_cache,
-        verbose=args.verbose,
-        debug=args.debug,
-    )
+    # Check if the data is already stored in the cache
+    train_zarr = root["train"]
+    valid_zarr = root["validation"]
 
-    # create a mask for the leadtimes
-    train_ldt_mask = (data["train"]["leadtime"] >= args.min_leadtime) & (
-        data["train"]["leadtime"] <= args.max_leadtime
-    )
-    train_ldt_mask = np.squeeze(train_ldt_mask.compute())
+    train_arrays = list(train_zarr.array_keys())
+    valid_arrays = list(valid_zarr.array_keys())
 
-    validation_ldt_mask = (data["validation"]["leadtime"] >= args.min_leadtime) & (
-        data["validation"]["leadtime"] <= args.max_leadtime
-    )
-    validation_ldt_mask = np.squeeze(validation_ldt_mask.compute())
-
-    #  Preprocessing
-
-    # Let's filter the data using leadtimes
-    print("Filtering data...", flush=True)
-    train_data = data["train"]["inputs"][train_ldt_mask]
-    valid_data = data["validation"]["inputs"][validation_ldt_mask]
-    # and the columns to ablate
-    ablate_cols = json.loads(args.ablate_cols)
-
-    if len(ablate_cols) > 0:
-        train_data = train_data[
-            :,
-            [i for i in range(train_data.shape[1]) if i not in ablate_cols],
-            :,
-            :,
+    # assert that AIX_masked, target_scaled, base_intensity_scaled, base_position, leadtime_scaled are in each group
+    assert np.all(
+        [
+            "masked_AIX" in train_arrays,
+            "target_scaled" in train_arrays,
+            "base_intensity_scaled" in train_arrays,
+            "base_position" in train_arrays,
+            "leadtime_scaled" in train_arrays,
+            "leadtime" in train_arrays,
+            "masked_AIX" in valid_arrays,
+            "target_scaled" in valid_arrays,
+            "base_intensity_scaled" in valid_arrays,
+            "base_position" in valid_arrays,
+            "leadtime_scaled" in valid_arrays,
+            "leadtime" in valid_arrays,
         ]
-        valid_data = valid_data[
-            :,
-            [i for i in range(valid_data.shape[1]) if i not in ablate_cols],
-            :,
-            :,
-        ]
-
-    if args.magAngle_mode:
-        train_data = mlf.uv_to_magAngle(train_data, u_idx=0, v_idx=1)
-        valid_data = mlf.uv_to_magAngle(valid_data, u_idx=0, v_idx=1)
-
-    # We will want to normalize the inputs for the model
-    # to work properly. We will use the AI_StandardScaler for this
-    # purpose
-    AI_scaler = None
-    from_cache = not args.overwrite_cache
-    fpath = os.path.join(cache_dir, "AI_scaler.pkl")
-
-    if from_cache:
-        if os.path.exists(fpath):
-            print("Loading AI scaler from cache...", flush=True)
-            with open(fpath, "rb") as f:
-                AI_scaler = pickle.load(f)
-
-    if AI_scaler is None:
-        print("Fitting AI datascaler...", flush=True)
-        # AI_data = optimize(AI_data)[0]
-        AI_scaler = mlf.AI_StandardScaler()
-        AI_scaler.fit(train_data, num_workers=num_cores)
-
-        # save the scaler to the cache
-        with open(fpath, "wb") as f:
-            pickle.dump(AI_scaler, f)
-
-    # We also want to do the same for the base intensity
-    base_scaler = None
-    from_cache = not args.overwrite_cache
-    fpath = os.path.join(cache_dir, "base_scaler.pkl")
-
-    if from_cache:
-        if os.path.exists(fpath):
-            print("Loading base scaler from cache...", flush=True)
-            with open(fpath, "rb") as f:
-                base_scaler = pickle.load(f)
-
-    if base_scaler is None:
-        print("Fitting base intensity scaler...", flush=True)
-        base_scaler = StandardScaler()
-        base_scaler.fit(data["train"]["base_intensity"][train_ldt_mask])
-
-        # save the scaler to the cache
-        with open(fpath, "wb") as f:
-            pickle.dump(base_scaler, f)
-
-    # and one for the base position
-    print("Encoding base position...", flush=True)
-    train_positions = mlf.latlon_to_sincos(
-        data["train"]["base_position"][train_ldt_mask]
-    ).compute()
-    valid_positions = mlf.latlon_to_sincos(
-        data["validation"]["base_position"][validation_ldt_mask]
-    ).compute()
-
-    # We'll encode the leadtime by dividing it by the max leadtime in the dataset
-    # which is 168 hours
-    print("Encoding leadtime...", flush=True)
-    max_train_ldt = data["train"]["leadtime"][train_ldt_mask].max().compute()
-    train_leadtimes = (
-        data["train"]["leadtime"][train_ldt_mask] / max_train_ldt
-    ).compute()
-    validation_leadtimes = (
-        data["validation"]["leadtime"][validation_ldt_mask] / max_train_ldt
-    ).compute()
-
-    if args.raw_target:
-        train_target = data["train"]["outputs"][train_ldt_mask]
-        valid_target = data["validation"]["outputs"][validation_ldt_mask]
-    else:
-        # We also want to precalculate the delta intensity for the
-        # training and validation sets
-        print("Calculating target (i.e., delta intensities)...", flush=True)
-        train_target = (
-            data["train"]["outputs"][train_ldt_mask]
-            - data["train"]["base_intensity"][train_ldt_mask]
-        )
-        valid_target = (
-            data["validation"]["outputs"][validation_ldt_mask]
-            - data["validation"]["base_intensity"][validation_ldt_mask]
-        )
-
-    # And scale the target data using the cached scaler if available
-    target_scaler = None
-    from_cache = not args.overwrite_cache
-    fpath = os.path.join(cache_dir, "target_scaler.pkl")
-
-    if from_cache:
-        if os.path.exists(fpath):
-            print("Loading target scaler from cache...", flush=True)
-            with open(fpath, "rb") as f:
-                target_scaler = pickle.load(f)
-
-    if target_scaler is None:
-        print("Fitting target scaler...", flush=True)
-        target_scaler = StandardScaler()
-        target_scaler.fit(train_target)
-
-        # save the scaler to the cache
-        with open(fpath, "wb") as f:
-            pickle.dump(target_scaler, f)
-
-    #  Dataloader & Hyperparameters
-
-    # Let's define some hyperparameters
-    batch_size = 32
-
-    # If the mode is not deterministic, we'll set the loss to CRPS
-    if args.mode != "deterministic":
-        loss_func = metrics.CRPS_ML
-    else:
-        if args.deterministic_loss == "RMSE":
-            loss_func = torch.nn.MSELoss()
-        elif args.deterministic_loss == "MAE":
-            loss_func = torch.nn.L1Loss()
+    ), "Missing Data in the cache"
+    # %%
+    if args.dask_array:
+        # Load the data from the zarr store using dask array
+        if args.mask:
+            train_data = da.from_zarr(zarr_store, component="train/masked_AIX")
+            valid_data = da.from_zarr(zarr_store, component="validation/masked_AIX")
         else:
-            raise ValueError("Loss function not recognized.")
-
-    num_workers = (
-        int(num_cores * 2 / 3)
-        if (calc_device == torch.device("cpu") and num_cores > 1)
-        else num_cores
-    )
-    dask.config.set(scheduler="threads")
-
-    scaled_trainX = AI_scaler.transform(train_data)
-    scaled_validX = AI_scaler.transform(valid_data)
-
-    if args.magAngle_mode:
-        feature_names = ["Magnitude", "Angle", "MSLP", "Z500", "T850"]
+            train_data = da.from_zarr(zarr_store, component="train/AIX_scaled")
+            valid_data = da.from_zarr(zarr_store, component="validation/AIX_scaled")
+        train_target = da.from_zarr(zarr_store, component="train/target_scaled")
+        valid_target = da.from_zarr(zarr_store, component="validation/target_scaled")
+        train_leadtimes = da.from_zarr(zarr_store, component="train/leadtime_scaled")
+        validation_leadtimes = da.from_zarr(
+            zarr_store, component="validation/leadtime_scaled"
+        )
+        train_base_intensity = da.from_zarr(
+            zarr_store, component="train/base_intensity_scaled"
+        )
+        valid_base_intensity = da.from_zarr(
+            zarr_store, component="validation/base_intensity_scaled"
+        )
+        train_base_position = da.from_zarr(zarr_store, component="train/base_position")
+        valid_base_position = da.from_zarr(
+            zarr_store, component="validation/base_position"
+        )
+        train_unscaled_leadtimes = da.from_zarr(zarr_store, component="train/leadtime")
+        validation_unscaled_leadtimes = da.from_zarr(
+            zarr_store, component="validation/leadtime"
+        )
     else:
-        feature_names = ["U10", "V10", "MSLP", "Z500", "T850"]
+        # load data with zarr
+        if args.mask:
+            train_data = train_zarr["masked_AIX"]
+            valid_data = valid_zarr["masked_AIX"]
+        else:
+            train_data = train_zarr["AIX_scaled"]
+            valid_data = valid_zarr["AIX_scaled"]
+        train_target = train_zarr["target_scaled"]
+        valid_target = valid_zarr["target_scaled"]
+        train_leadtimes = train_zarr["leadtime_scaled"]
+        validation_leadtimes = valid_zarr["leadtime_scaled"]
+        train_base_intensity = train_zarr["base_intensity_scaled"]
+        valid_base_intensity = valid_zarr["base_intensity_scaled"]
+        train_base_position = train_zarr["base_position"]
+        valid_base_position = valid_zarr["base_position"]
+        train_unscaled_leadtimes = train_zarr["leadtime"]
+        validation_unscaled_leadtimes = valid_zarr["leadtime"]
+    # %%
+    fit = False
+    if fit:
+        scaled_trainX = train_data
+        scaled_validX = valid_data
 
-    for i in range(scaled_trainX.shape[1]):
-        print(f"Processing feature {i+1} of {scaled_trainX.shape[1]}", flush=True)
-        # Step 2: Create a Dask array from the scaled data
-        train_hist, train_bin_edges = da.histogram(
-            scaled_trainX[:, i], bins=50, range=[-4, 4]
+        if args.magAngle_mode:
+            feature_names = ["Magnitude", "Angle", "MSLP", "Z500", "T850"]
+        else:
+            feature_names = ["U10", "V10", "MSLP", "Z500", "T850"]
+
+        #  Histogram creation
+        # Start with creating a dictionary to store the histogram data
+        histograms = {}
+        edge_val = 4
+        num_bins = 25
+        for i in range(scaled_trainX.shape[1]):
+            print(f"Processing feature {i+1} of {scaled_trainX.shape[1]}", flush=True)
+            # Step 2: Create a Dask array from the scaled data
+            train_hist, train_bin_edges = da.histogram(
+                scaled_trainX[:, i], bins=num_bins, range=[-edge_val, edge_val]
+            )
+
+            # Compute the histogram (this triggers the computation)
+            train_hist = train_hist.compute()
+            # train_bin_edges = train_bin_edges.compute()
+
+            # Step 2: Create a Dask array from the scaled data
+            valid_hist, valid_bin_edges = da.histogram(
+                scaled_validX[:, i], bins=num_bins, range=[-edge_val, edge_val]
+            )
+
+            # Compute the histogram (this triggers the computation)
+            valid_hist = valid_hist.compute()
+            valid_bin_edges = valid_bin_edges
+
+            fig, ax = plt.subplots(1, figsize=(10, 6), dpi=150)
+            ax.hist(
+                train_bin_edges[:-1],
+                train_bin_edges,
+                weights=train_hist,
+                label="Training Data",
+                alpha=0.5,
+                density=True,
+            )
+            ax.hist(
+                valid_bin_edges[:-1],
+                valid_bin_edges,
+                weights=valid_hist,
+                label="Validation Data",
+                alpha=0.5,
+                color="red",
+                density=True,
+            )
+            ax.set_xlabel("Normalized Value")
+            ax.set_ylabel("Frequency")
+            ax.set_title(f"Histogram for feature {feature_names[i]} using Dask Array")
+            ax.legend()
+
+            plt.show()
+            # Save the histogram data to the dictionary
+            histograms[feature_names[i]] = {
+                "train_hist": train_hist,
+                "train_bin_edges": train_bin_edges,
+                "valid_hist": valid_hist,
+                "valid_bin_edges": valid_bin_edges,
+            }
+        # Save the histogram data
+        with open(
+            os.path.join(
+                result_dir, f"histograms_{'mask' if args.mask else 'unmasked'}.pkl"
+            ),
+            "wb",
+        ) as f:
+            pickle.dump(histograms, f)
+
+        print("Histogram data saved successfully.")
+        print("Histogram creation completed.", flush=True)
+    else:
+        # Load the histogram data from the pickle file
+        with open(
+            os.path.join(
+                result_dir, f"histograms_{'mask' if args.mask else 'unmasked'}.pkl"
+            ),
+            "rb",
+        ) as f:
+            histograms = pickle.load(f)
+    # %%
+    # Print the loaded histogram data
+    for feature_name, hist_data in histograms.items():
+        print(f"Feature: {feature_name}")
+
+        # calculate the bin centers
+        train_bin_centers = 0.5 * (
+            hist_data["train_bin_edges"][1:] + hist_data["train_bin_edges"][:-1]
+        )
+        valid_bin_centers = 0.5 * (
+            hist_data["valid_bin_edges"][1:] + hist_data["valid_bin_edges"][:-1]
         )
 
-        # Compute the histogram (this triggers the computation)
-        train_hist = train_hist.compute()
-        # train_bin_edges = train_bin_edges.compute()
+        # make counts density
+        train_density = hist_data["train_hist"] / np.sum(hist_data["train_hist"])
+        valid_density = hist_data["valid_hist"] / np.sum(hist_data["valid_hist"])
 
-        # Step 2: Create a Dask array from the scaled data
-        valid_hist, valid_bin_edges = da.histogram(
-            scaled_validX[:, i], bins=50, range=[-4, 4]
-        )
+        # find indices of the bins that are not empty
+        non_empty_bins_train = np.where(train_density > 0)[0]
+        non_empty_bins_valid = np.where(valid_density > 0)[0]
 
-        # Compute the histogram (this triggers the computation)
-        valid_hist = valid_hist.compute()
-        valid_bin_edges = valid_bin_edges
-
-        fig, ax = plt.subplots(1, figsize=(10, 6), dpi=150)
-        ax.hist(
-            train_bin_edges[:-1],
-            train_bin_edges,
-            weights=train_hist,
-            label="Training Data",
-            alpha=0.5,
-            density=True,
-        )
-        ax.hist(
-            valid_bin_edges[:-1],
-            valid_bin_edges,
-            weights=valid_hist,
-            label="Validation Data",
-            alpha=0.5,
-            color="red",
-            density=True,
-        )
-        ax.set_xlabel("Normalized Value")
-        ax.set_ylabel("Frequency")
-        ax.set_title(f"Histogram for feature {feature_names[i]} using Dask Array")
-        ax.legend()
-
-        plt.show()
+        print("Train Bin Centers: ")
+        for center, count in zip(train_bin_centers, train_density):
+            print(f"({center},{count}) ", end="")
+        print("\nValid Bin Centers: ")
+        for center, count in zip(valid_bin_centers, valid_density):
+            print(f"({center},{count}) ", end="")
+        print("\n")
+# %%

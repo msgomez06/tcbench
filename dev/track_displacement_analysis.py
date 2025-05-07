@@ -286,8 +286,37 @@ if __name__ == "__main__":
     lat_speed = mean_delta_lat / np.array(leadtimes)
     mean_lat_speed = np.mean(lat_speed)
 
-    # %%
+# %% Pair printing for tex
+for var in [displacement_percentiles, delta_lon_percentiles, delta_lat_percentiles]:
+    if var is displacement_percentiles:
+        label = "Displacement"
+    elif var is delta_lon_percentiles:
+        label = "Delta Lon"
+    elif var is delta_lat_percentiles:
+        label = "Delta Lat"
 
+    print(f"{label} Percentiles")
+    for q_idx, ptile in enumerate(q):
+        print(f"\n{ptile}th Percentile:")
+        for idx, lead in enumerate(leadtimes):
+            print(f"({lead}, {var[idx, q_idx]})", end=" ")
+
+    print("\n----------------")
+    print(f"\nMean {label} points")
+    # Print the mean speed pairs
+    x = np.linspace(0, 168, 20)
+    if var is displacement_percentiles:
+        y = mean_speed * x
+    elif var is delta_lon_percentiles:
+        y = mean_lon_speed * x
+    elif var is delta_lat_percentiles:
+        y = mean_lat_speed * x
+
+    for i in range(len(x)):
+        print(f"({x[i]}, {y[i]})", end=" ")
+    print("\n----------------")
+
+    # %% Plotting
     # Define colorblind safe colors for plotting
     colors = [
         np.array([215, 166, 122]) / 255,
@@ -318,7 +347,7 @@ if __name__ == "__main__":
         ax.set_ylabel("Displacement (km)")
         ax.legend()
     toolbox.plot_facecolors(fig=fig, axes=axes)
-#%%
+    # %%
     # Plot the delta lon percentiles
     fig, axes = plt.subplots(3, 3, figsize=(15, 15), dpi=150)
     axes = axes.flatten()
@@ -345,7 +374,7 @@ if __name__ == "__main__":
     # Plot the delta lat percentiles
     fig, axes = plt.subplots(3, 3, figsize=(15, 15), dpi=150)
     axes = axes.flatten()
-    
+
     for i, ax in enumerate(axes):
         ax.plot(
             leadtimes,

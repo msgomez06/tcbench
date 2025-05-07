@@ -22,11 +22,6 @@ import dask.array as da
 import pandas as pd
 from scipy.special import erf
 
-try:
-    import torch
-except:
-    print("torch not available")
-
 # Backend Libraries
 import joblib as jl
 
@@ -330,6 +325,341 @@ def plot_performance(metrics: dict, ax, **kwargs):
         ax2.set_xticks(range(len(metric_names)))
         ax2.set_xticklabels([""] * len(metric_names))
         ax2.legend(loc="lower right", framealpha=0.5)
+
+
+def DPE(reference, predictions, **kwargs):
+    """Compute the Direct Position Error (DPE) between the reference and predictions.
+    Parameters
+    ----------
+    reference : pandas dataframe with shape (n_samples, n_features)
+        The reference values. Needs to have the SID, lat, lon columns.
+
+    predictions : pandas dataframe with shape (n_samples, n_features)
+        The predicted values."""
+
+    # Check if a columns dictionary for the reference DataFrame is provided
+    ref_col_dict = kwargs.get("ref_columns", None)
+    if ref_col_dict is None:
+        # Default columns dictionary
+        ref_cols = {
+            "SID": "SID",
+            "lat": "LAT",
+            "lon": "LON",
+            "initial_time": "ISO_TIME",
+        }
+    else:
+        ref_cols = ref_col_dict
+
+    # Check if a columns dictionary for the predictions DataFrame is provided
+    pred_col_dict = kwargs.get("pred_columns", None)
+    if pred_col_dict is None:
+        # Default columns dictionary
+        pred_cols = {
+            "SID": "SID",
+            "lat": "lat",
+            "lon": "lon",
+            "valid_time": "Valid Time",
+        }
+    else:
+        pred_cols = pred_col_dict
+
+    # Check if the reference DataFrame contains the required columns
+    for key in ref_cols.values():
+        if key not in reference.columns:
+            raise ValueError(f"Missing column '{key}' in reference DataFrame.")
+
+    # Check that the predictions DataFrame contains the required columns
+    for key in pred_cols.values():
+        if key not in predictions.columns:
+            raise ValueError(f"Missing column '{key}' in predictions DataFrame.")
+
+    for storm_id in reference.SID.unique():
+        # Get the reference and prediction data for the current storm ID
+        ref_data = reference[reference[ref_cols["SID"]] == storm_id]
+        pred_data = predictions[predictions[pred_cols["SID"]] == storm_id]
+
+        # make a nan-filled column for the DPE in the predictions DataFrame
+        pred_data["DPE"] = np.nan
+
+        for val_time in pred_data[pred_cols["valid_time"]].unique():
+            # Get the reference and prediction data for the current valid time
+            ref_data_val = ref_data[ref_data[ref_cols["initial_time"]] == val_time]
+            pred_data_val = pred_data[pred_data[pred_cols["valid_time"]] == val_time]
+
+            if len(ref_data_val) == 0 or len(pred_data_val) == 0:
+                continue
+
+            distances = toolbox.haversine(
+                ref_data_val[ref_cols["lat"]].to_numpy(),
+                ref_data_val[ref_cols["lon"]].to_numpy(),
+                pred_data_val[pred_cols["lat"]].to_numpy(),
+                pred_data_val[pred_cols["lon"]].to_numpy(),
+            )
+
+            pred_data.loc[pred_data_val.index, "DPE"] = distances
+
+    return pred_data["DPE"].to_numpy()
+
+
+def FCRPS(reference, predictions, **kwargs):
+    """Compute the Fair CRPS between the reference and predictions using the kernel
+    representation of the CRPS. Wind max and pressure min are assumed targets.
+
+    Reference:
+    Leutbecher, M. (2019). Ensemble size: How suboptimal is less than infinity?,
+    QJ Roy. Meteor. Soc., 145, 107–128.
+
+
+    Parameters
+    ----------
+    reference : pandas dataframe with shape (n_samples, n_features)
+        The reference values. Needs to have the SID and columns with the variables
+        to evaluate - default is `USA_WIND` and `USA_PRES`.
+
+    predictions : pandas dataframe with shape (n_samples, n_features)
+        The predicted values."""
+
+    # Check if a columns dictionary for the reference DataFrame is provided
+    ref_col_dict = kwargs.get("ref_columns", None)
+
+    if ref_col_dict is None:
+        # Default columns dictionary
+        ref_cols = {
+            "SID": "SID",
+            "wind": "USA_WIND",
+            "pressure": "USA_PRES",
+            "initial_time": "ISO_TIME",
+        }
+    else:
+        ref_cols = ref_col_dict
+
+    # Check if a columns dictionary for the predictions DataFrame is provided
+    pred_col_dict = kwargs.get("pred_columns", None)
+    if pred_col_dict is None:
+        # Default columns dictionary
+        pred_cols = {
+            "SID": "SID",
+            "wind": "wind max",
+            "pressure": "pressure min",
+            "valid_time": "Valid Time",
+            "init_time": "Initial Time",
+            "ensemble_idx": "ensemble_idx",
+        }
+    else:
+        pred_cols = pred_col_dict
+
+    # Check if the reference DataFrame contains the required columns
+    for key in ref_cols.values():
+        if key not in reference.columns:
+            raise ValueError(f"Missing column '{key}' in reference DataFrame.")
+
+    # Check that the predictions DataFrame contains the required columns
+    for key in pred_cols.values():
+        if key not in predictions.columns:
+            raise ValueError(f"Missing column '{key}' in predictions DataFrame.")
+
+    sample_idx = predictions[pred_cols["ensemble_idx"]].unique()[0]
+    CRPS = predictions[predictions[pred_cols["ensemble_idx"]] == sample_idx].copy()
+    # keep only the SID, valid time, and init time columns
+    CRPS = CRPS[[pred_cols["SID"], pred_cols["valid_time"], pred_cols["init_time"]]]
+    # add the target columns
+    CRPS["CRPS_vmax"] = np.nan
+    CRPS["CRPS_pmin"] = np.nan
+
+    for storm_id in reference.SID.unique():
+        # Get the reference and prediction data for the current storm ID
+        ref_data = reference[reference[ref_cols["SID"]] == storm_id]
+        pred_data = predictions[predictions[pred_cols["SID"]] == storm_id]
+
+        for val_time in pred_data[pred_cols["valid_time"]].unique():
+            # Get the reference and prediction data for the current valid time
+            ref_data_val = ref_data[ref_data[ref_cols["initial_time"]] == val_time]
+            pred_data_val = pred_data[pred_data[pred_cols["valid_time"]] == val_time]
+
+            if len(ref_data_val) == 0 or len(pred_data_val) == 0:
+                continue
+
+            for init_time in pred_data_val[pred_cols["init_time"]].unique():
+                ensemble_vals = pred_data_val[
+                    pred_data_val[pred_cols["init_time"]] == init_time
+                ]
+                num_members = len(ensemble_vals)
+                if len(ensemble_vals) == 0:
+                    continue
+
+                ref_wind = ref_data_val[ref_cols["wind"]].to_numpy().astype(np.float32)
+                ref_pressure = (
+                    ref_data_val[ref_cols["pressure"]].to_numpy().astype(np.float32)
+                )
+
+                diff_wind = np.abs(
+                    ref_wind - ensemble_vals[pred_cols["wind"]].to_numpy()
+                )
+                diff_matrix_wind = np.abs(
+                    ensemble_vals[pred_cols["wind"]].to_numpy()[:, None]
+                    - ensemble_vals[pred_cols["wind"]].to_numpy()[None, :]
+                )
+
+                diff_pressure = np.abs(
+                    ref_pressure - ensemble_vals[pred_cols["pressure"]].to_numpy()
+                )
+                diff_matrix_pressure = np.abs(
+                    ensemble_vals[pred_cols["pressure"]].to_numpy()[:, None]
+                    - ensemble_vals[pred_cols["pressure"]].to_numpy()[None, :]
+                )
+
+                # CRPS for wind
+                crps_wind = (
+                    diff_wind.mean()
+                    - 1 / (2 * num_members * (num_members - 1)) * diff_matrix_wind.sum()
+                )
+                # CRPS for pressure
+                crps_pressure = (
+                    diff_pressure.mean()
+                    - 1
+                    / (2 * num_members * (num_members - 1))
+                    * diff_matrix_pressure.sum()
+                )
+
+                locator = (
+                    (CRPS[pred_cols["SID"]] == storm_id)
+                    & (CRPS[pred_cols["valid_time"]] == val_time)
+                    & (CRPS[pred_cols["init_time"]] == init_time)
+                )
+
+                CRPS.loc[
+                    locator,
+                    "CRPS_vmax",
+                ] = crps_wind
+                CRPS.loc[
+                    locator,
+                    "CRPS_pmin",
+                ] = crps_pressure
+
+    return CRPS[["CRPS_vmax", "CRPS_pmin"]].to_numpy()
+
+
+def HCRPS(reference, predictions, **kwargs):
+    """Compute the Haversinial, Fair CRPS between the reference and predictions using the
+    kernel representation of the CRPS. lat and lon are required in the predictions.
+    Haversinial distance is used instead of the Euclidean distance to calculate the CRPS.
+
+    Reference:
+    Leutbecher, M. (2019). Ensemble size: How suboptimal is less than infinity?,
+    QJ Roy. Meteor. Soc., 145, 107–128.
+
+    Gneiting, T., & Raftery, A. E. (2007). Strictly proper scoring rules, prediction,
+    and estimation. Journal of the American statistical Association, 102(477), 359-378.
+
+    Parameters
+    ----------
+    reference : pandas dataframe with shape (n_samples, n_features)
+        The reference values. Needs to have the SID and columns with the variables
+        to evaluate - default is `LAT` and `LON`.
+
+    predictions : pandas dataframe with shape (n_samples, n_features)
+        The predicted values."""
+
+    # Check if a columns dictionary for the reference DataFrame is provided
+    ref_col_dict = kwargs.get("ref_columns", None)
+
+    if ref_col_dict is None:
+        # Default columns dictionary
+        ref_cols = {
+            "SID": "SID",
+            "lat": "LAT",
+            "lon": "LON",
+            "initial_time": "ISO_TIME",
+        }
+    else:
+        ref_cols = ref_col_dict
+
+    # Check if a columns dictionary for the predictions DataFrame is provided
+    pred_col_dict = kwargs.get("pred_columns", None)
+    if pred_col_dict is None:
+        # Default columns dictionary
+        pred_cols = {
+            "SID": "SID",
+            "lat": "lat",
+            "lon": "lon",
+            "valid_time": "Valid Time",
+            "init_time": "Initial Time",
+            "ensemble_idx": "ensemble_idx",
+        }
+    else:
+        pred_cols = pred_col_dict
+
+    # Check if the reference DataFrame contains the required columns
+    for key in ref_cols.values():
+        if key not in reference.columns:
+            raise ValueError(f"Missing column '{key}' in reference DataFrame.")
+
+    # Check that the predictions DataFrame contains the required columns
+    for key in pred_cols.values():
+        if key not in predictions.columns:
+            raise ValueError(f"Missing column '{key}' in predictions DataFrame.")
+
+    sample_idx = predictions[pred_cols["ensemble_idx"]].unique()[0]
+    CRPS = predictions[predictions[pred_cols["ensemble_idx"]] == sample_idx].copy()
+    # keep only the SID, valid time, and init time columns
+    CRPS = CRPS[[pred_cols["SID"], pred_cols["valid_time"], pred_cols["init_time"]]]
+    # add the target column
+    CRPS["CRPS_haversine"] = np.nan
+
+    for storm_id in reference.SID.unique():
+        # Get the reference and prediction data for the current storm ID
+        ref_data = reference[reference[ref_cols["SID"]] == storm_id]
+        pred_data = predictions[predictions[pred_cols["SID"]] == storm_id]
+
+        for val_time in pred_data[pred_cols["valid_time"]].unique():
+            # Get the reference and prediction data for the current valid time
+            ref_data_val = ref_data[ref_data[ref_cols["initial_time"]] == val_time]
+            pred_data_val = pred_data[pred_data[pred_cols["valid_time"]] == val_time]
+
+            if len(ref_data_val) == 0 or len(pred_data_val) == 0:
+                continue
+
+            for init_time in pred_data_val[pred_cols["init_time"]].unique():
+                ensemble_vals = pred_data_val[
+                    pred_data_val[pred_cols["init_time"]] == init_time
+                ]
+                num_members = len(ensemble_vals)
+                if len(ensemble_vals) == 0:
+                    continue
+
+                ref_lat = ref_data_val[ref_cols["lat"]].to_numpy().astype(np.float32)
+                ref_lon = ref_data_val[ref_cols["lon"]].to_numpy().astype(np.float32)
+
+                diff_track = toolbox.haversine(
+                    ref_lat,
+                    ref_lon,
+                    ensemble_vals[pred_cols["lat"]].to_numpy(),
+                    ensemble_vals[pred_cols["lon"]].to_numpy(),
+                )
+                diff_matrix = toolbox.haversine(
+                    ensemble_vals[pred_cols["lat"]].to_numpy()[:, None],
+                    ensemble_vals[pred_cols["lon"]].to_numpy()[:, None],
+                    ensemble_vals[pred_cols["lat"]].to_numpy()[None, :],
+                    ensemble_vals[pred_cols["lon"]].to_numpy()[None, :],
+                )
+
+                haver_crps = (
+                    diff_track.mean()
+                    - 1 / (2 * num_members * (num_members - 1)) * diff_matrix.sum()
+                )
+
+                locator = (
+                    (CRPS[pred_cols["SID"]] == storm_id)
+                    & (CRPS[pred_cols["valid_time"]] == val_time)
+                    & (CRPS[pred_cols["init_time"]] == init_time)
+                )
+
+                CRPS.loc[
+                    locator,
+                    "CRPS_haversine",
+                ] = haver_crps
+
+    return CRPS[["CRPS_haversine"]].to_numpy()
 
 
 # %%

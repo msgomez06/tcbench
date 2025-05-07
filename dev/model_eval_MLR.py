@@ -51,14 +51,14 @@ if __name__ == "__main__":
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
             # "--ai_model",
             # "fourcastnetv2",
-            # "--overwrite_cache",
+            "--overwrite_cache",
             # "--min_leadtime",
             # "6",
             # "--max_leadtime",
             # "24",
             # "--use_gpu",
             # "--verbose",
-            # "--reanalysis",
+            "--reanalysis",
             # "--mode",
             # "probabilistic",
             "--cache_dir",
@@ -66,8 +66,9 @@ if __name__ == "__main__":
             # "/srv/scratch/mgomezd1/cache",
             "--magAngle_mode",
             "--dask_array",
-            "--tag",
-            "ANN_LeakyRelu",
+            # "--tag",
+            # "ANN_LeakyRelu",
+            # "--shap",
         ]
     # %%
     # check if the context has been set for torch multiprocessing
@@ -222,6 +223,11 @@ if __name__ == "__main__":
         default="",
         help="Tag for the model",
     )
+    parser.add_argument(
+        "--shap",
+        action="store_true",
+        help="Whether to use SHAP for the model",
+    )
 
     args = parser.parse_args()
 
@@ -233,7 +239,9 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(
+        args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
+    )
     result_dir = args.result_dir
 
     # Check for GPU availability
@@ -384,32 +392,46 @@ if __name__ == "__main__":
             ]
         ).T
 
+        nan_idxs = np.isnan(valid_x).any(axis=1)
+        valid_data = valid_data[~nan_idxs]
+        deep_scalars = deep_scalars[~nan_idxs]
+        valid_x = valid_x[~nan_idxs]
+        unmasked_valid_target = valid_target.copy()
+        valid_target = valid_target[~nan_idxs]
+        validation_unscaled_leadtimes = validation_unscaled_leadtimes[~nan_idxs]
+
+        unmasked_nan_idxs = np.isnan(unmasked_valid_x).any(axis=1)
+        unmasked_valid_x = unmasked_valid_x[~unmasked_nan_idxs]
+        unmasked_valid_target = unmasked_valid_target[~unmasked_nan_idxs]
+
+        # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
+
         # -------------------------------
         models = [
             # {
-            #     "filepath": f"{results_dir}best_model_TorchMLR_12-12-15h15_epoch-40_panguweather_deterministic MagUnmasked.pt",
+            #     "filepath": f"{results_dir}TorchMLR_04-02-14h25_epoch-19_panguweather_deterministic_unmasked.pt",
             #     "masked": False,
             #     "probabilistic": False,
+            #     "tag": "unmasked MLR ",
+            #     "results": [],
+            #     "deep": False,
+            # },
+            # {
+            #     "filepath": f"{results_dir}MLR_01-27-11h45_epoch-20_panguweather_probabilistic_prob_unmasked.pt",
+            #     "masked": False,
+            #     "probabilistic": True,
             #     "tag": "unmasked MLR",
             #     "results": [],
             #     "deep": False,
             # },
-            {
-                "filepath": f"{results_dir}MLR_01-27-11h45_epoch-20_panguweather_probabilistic_prob_unmasked.pt",
-                "masked": False,
-                "probabilistic": True,
-                "tag": "unmasked MLR",
-                "results": [],
-                "deep": False,
-            },
-            {
-                "filepath": f"{results_dir}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
-                "masked": True,
-                "probabilistic": True,
-                "tag": "masked MLR",
-                "results": [],
-                "deep": False,
-            },
+            # {
+            #     "filepath": f"{results_dir}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
+            #     "masked": True,
+            #     "probabilistic": True,
+            #     "tag": "masked MLR",
+            #     "results": [],
+            #     "deep": False,
+            # },
             # {
             #     "filepath": f"{results_dir}best_model_TorchMLR_12-12-14h37_epoch-40_panguweather_deterministic MagMasked.pt",
             #     "masked": True,
@@ -437,21 +459,37 @@ if __name__ == "__main__":
             #     "deep": False,
             # },
             # {
-            #     "filepath": f"{results_dir}SimpleANN_01-31-11h47_epoch-15_panguweather_probabilistic_unmasked.pt",
+            #     "filepath": f"{results_dir}SimpleANN_01-31-11h47_epoch-13_panguweather_probabilistic_unmasked.pt",
             #     "masked": False,
             #     "probabilistic": True,
-            #     "tag": "Unmasked ANN (Hardswish)",
+            #     "tag": "Unmasked ANN (LeakyRelu)(PU)",
             #     "results": [],
             #     "deep": False,
             # },
-            {
-                "filepath": f"{results_dir}SimpleANN_02-03-08h29_epoch-15_panguweather_probabilistic_masked.pt",
-                "masked": True,
-                "probabilistic": True,
-                "tag": "ANN (LeakyReLU)",
-                "results": [],
-                "deep": False,
-            },
+            # {
+            #     "filepath": f"{results_dir}SimpleANN_02-03-08h29_epoch-15_panguweather_probabilistic_masked.pt",
+            #     "masked": True,
+            #     "probabilistic": True,
+            #     "tag": "ANN (LeakyReLU)",
+            #     "results": [],
+            #     "deep": False,
+            # },
+            # {
+            #     "filepath": f"{results_dir}SimpleANN_04-02-14h16_epoch-19_panguweather_deterministic_masked.pt",
+            #     "masked": True,
+            #     "probabilistic": False,
+            #     "tag": "ANN (LeakyReLU) (DM)",
+            #     "results": [],
+            #     "deep": False,
+            # },
+            # {
+            #     "filepath": f"{results_dir}SimpleANN_04-02-14h22_epoch-7_panguweather_deterministic_unmasked.pt",
+            #     "masked": False,
+            #     "probabilistic": False,
+            #     "tag": "ANN (LeakyReLU) (DU)",
+            #     "results": [],
+            #     "deep": False,
+            # },
             ##############################
             # Probabilistic UNets
             # {
@@ -777,6 +815,39 @@ if __name__ == "__main__":
             #     "results": [],
             #     "deep": True,
             # },
+            ##############################
+            {
+                "filepath": f"{results_dir}TorchMLR_04-10-14h58_epoch-29_ERA5_probabilistic_masked.pt",
+                "masked": True,
+                "probabilistic": True,
+                "tag": "ERA5 IC Masked MLR",
+                "results": [],
+                "deep": False,
+            },
+            {
+                "filepath": f"{results_dir}SimpleANN_04-10-14h54_epoch-12_ERA5_probabilistic_masked.pt",
+                "masked": True,
+                "probabilistic": True,
+                "tag": "ERA5 IC Masked ANN",
+                "results": [],
+                "deep": False,
+            },
+            {
+                "filepath": f"{results_dir}TorchMLR_04-10-14h11_epoch-28_ERA5_deterministic_masked.pt",
+                "masked": True,
+                "probabilistic": False,
+                "tag": "ERA5 IC Masked MLR",
+                "results": [],
+                "deep": False,
+            },
+            {
+                "filepath": f"{results_dir}TorchMLR_04-10-14h11_epoch-6_ERA5_deterministic_masked.pt",
+                "masked": True,
+                "probabilistic": False,
+                "tag": "ERA5 IC Masked ANN",
+                "results": [],
+                "deep": False,
+            },
         ]
 
         # Load each pytorch model into the models dictionary
@@ -876,31 +947,32 @@ if __name__ == "__main__":
 
                         num_samples = len(temp_x)
 
-                        # sample a third of the data
-                        explainer = shap.DeepExplainer(
-                            model["model"],
-                            torch.tensor(
-                                temp_x[: int(num_samples / 3)],
-                                dtype=torch.float32,
-                            ).to(calc_device),
-                        )
-                        shap_data = torch.tensor(temp_x[-300:], dtype=torch.float32).to(
-                            calc_device
-                        )
-                        shap_values = explainer(shap_data)
-                        model["shap_values"][unique_leadtime] = shap_values
-                        model["shap_data"][unique_leadtime] = shap_data
-                        model["shap_features"] = [
-                            "Max Wind Magnitude",
-                            "Min MSLP",
-                            "Range Wind Magnitude",
-                            "Range MSLP",
-                            "Min Z500",
-                            "Range T850",
-                            "Leadtime",
-                            "Base Max Wind",
-                            "Base Min MSLP",
-                        ]
+                        if args.shap:
+                            # sample a third of the data
+                            explainer = shap.DeepExplainer(
+                                model["model"],
+                                torch.tensor(
+                                    temp_x[: int(num_samples / 3)],
+                                    dtype=torch.float32,
+                                ).to(calc_device),
+                            )
+                            shap_data = torch.tensor(
+                                temp_x[-300:], dtype=torch.float32
+                            ).to(calc_device)
+                            shap_values = explainer(shap_data)
+                            model["shap_values"][unique_leadtime] = shap_values
+                            model["shap_data"][unique_leadtime] = shap_data
+                            model["shap_features"] = [
+                                "Max Wind Magnitude",
+                                "Min MSLP",
+                                "Range Wind Magnitude",
+                                "Range MSLP",
+                                "Min Z500",
+                                "Range T850",
+                                "Leadtime",
+                                "Base Max Wind",
+                                "Base Min MSLP",
+                            ]
 
                     else:
                         # Work by batches
@@ -948,30 +1020,31 @@ if __name__ == "__main__":
 
                         num_samples = len(temp_x)
 
-                        # sample a third of the data
-                        explainer = shap.DeepExplainer(
-                            model["model"],
-                            torch.tensor(
-                                temp_x[: int(num_samples / 3)],
-                                dtype=torch.float32,
-                            ).to(calc_device),
-                        )
-                        shap_data = torch.tensor(temp_x[-300:], dtype=torch.float32).to(
-                            calc_device
-                        )
-                        shap_values = explainer.shap_values(shap_data)
-                        model["shap_values"][unique_leadtime] = shap_values
-                        model["shap_data"][unique_leadtime] = shap_data
-                        model["shap_features"] = [
-                            "Max Wind Magnitude",
-                            "Min MSLP",
-                            "Range Wind Magnitude",
-                            "Range MSLP",
-                            "Min Z500",
-                            "Range T850",
-                            "Leadtime",
-                            "Base Intensity",
-                        ]
+                        if args.shap:
+                            # sample a third of the data
+                            explainer = shap.DeepExplainer(
+                                model["model"],
+                                torch.tensor(
+                                    temp_x[: int(num_samples / 3)],
+                                    dtype=torch.float32,
+                                ).to(calc_device),
+                            )
+                            shap_data = torch.tensor(
+                                temp_x[-300:], dtype=torch.float32
+                            ).to(calc_device)
+                            shap_values = explainer.shap_values(shap_data)
+                            model["shap_values"][unique_leadtime] = shap_values
+                            model["shap_data"][unique_leadtime] = shap_data
+                            model["shap_features"] = [
+                                "Max Wind Magnitude",
+                                "Min MSLP",
+                                "Range Wind Magnitude",
+                                "Range MSLP",
+                                "Min Z500",
+                                "Range T850",
+                                "Leadtime",
+                                "Base Intensity",
+                            ]
                     else:
                         prediction = model["model"](
                             torch.tensor(temp_deepx, dtype=torch.float32).to(
@@ -1010,6 +1083,43 @@ if __name__ == "__main__":
             climatology_results = data["climatology_results"]
             persistence_results = data["persistence_results"]
             unique_leadtimes = data["unique_leadtimes"]
+
+
+# %%
+# Print out the per leadtime results
+for model in models:
+    print(
+        f"\n Model {model['tag']} mode: {'probabilistic' if model['probabilistic'] else 'deterministic'}"
+    )
+    for i, result in enumerate(model["results"]):
+        print(f"({unique_leadtimes[i]}, {result}) ", end="")
+# %%
+# Print out the climatology and persistence results per leadtime
+print("\n Deterministic Climatology Results:")
+for i, result in enumerate(climatology_results["deterministic"]):
+    print(
+        f"({unique_leadtimes[i]}, {result}) ",
+        end="",
+    )
+print("\n Probabilistic Climatology Results:")
+for i, result in enumerate(climatology_results["probabilistic"]):
+    print(
+        f"({unique_leadtimes[i]}, {result}) ",
+        end="",
+    )
+print("\n Deterministic Persistence Results:")
+for i, result in enumerate(persistence_results["deterministic"]):
+    print(
+        f"({unique_leadtimes[i]}, {result}) ",
+        end="",
+    )
+print("\n Probabilistic Persistence Results:")
+for i, result in enumerate(persistence_results["probabilistic"]):
+    print(
+        f"({unique_leadtimes[i]}, {result}) ",
+        end="",
+    )
+
 
 # %% Plotting the results
 
@@ -1142,148 +1252,159 @@ fig.tight_layout()
 fig.savefig(f"{results_dir}model_comparison_eval_{args.tag}.png")
 
 # %%
-for model in models:
-    # Plotting the SHAP values
-    # fig, axs = plt.subplots(1, 2, figsize=(12, 6), dpi=150)
-    shap_values = model["shap_values"]
-    shap_data = model["shap_data"]
-    shap_features = [
-        "Max Wind Magnitude",
-        "Min Mean SLP",
-        "Range Wind Magnitude",
-        "Range Mean SLP",
-        "Min Z500",
-        "Range T850",
-        "Leadtime",
-        "Base Max Wind",
-        "Base Min SLP",
-    ]
-
-    def plot_adjuster(height, width, dpi, figtitle):
-        fig = plt.gcf()
-        fig.set_figheight(height)
-        fig.set_figwidth(width)
-        fig.set_dpi(dpi)
-        fig.suptitle(figtitle, horizontalalignment="center")
-        # plt.tight_layout()
-        # set margins
-        plt.subplots_adjust(left=0.35, right=0.88, top=0.88, bottom=0.12)
-
-        # ax = plt.gca()
-        # # Set the left margin to 0.3
-        # ax.spines["left"].set_position(("axes", 0.3))
-
-    unique_leadtimes = list(shap_values.keys())
-    for j, target in enumerate(
-        [
-            "(mu) Maximum Wind",
-            "(sigma) Maximum Wind",
-            "(mu) Minimum SLP",
-            "(sigma) Minimum SLP",
+if args.shap:
+    for model in models:
+        # Plotting the SHAP values
+        # fig, axs = plt.subplots(1, 2, figsize=(12, 6), dpi=150)
+        shap_values = model["shap_values"]
+        shap_data = model["shap_data"]
+        shap_features = [
+            "Max Wind Magnitude",
+            "Min Mean SLP",
+            "Range Wind Magnitude",
+            "Range Mean SLP",
+            "Min Z500",
+            "Range T850",
+            "Leadtime",
+            "Base Max Wind",
+            "Base Min SLP",
         ]
-    ):
-        for i, leadtime in enumerate([6, 12, 18, 24, 48, 72, 96, 120, 144, 168]):
-            shap.summary_plot(
-                shap_values[leadtime][:, :, j],
-                shap_data[leadtime],
-                feature_names=np.array(shap_features),
-                max_display=len(shap_features),
-                plot_type="dot",
-                show=False,
-                color_bar=True,
-                alpha=0.75,
-                # ax=axs[i],
-            )
-            plot_adjuster(
-                8, 8, 250, f"{model['tag']} - {leadtime}h ldt - {target}\nSHAP Values"
-            )
 
-            # plt.show()
-            if not os.path.exists(os.path.join(results_dir, "shap")):
-                os.makedirs(os.path.join(results_dir, "shap"))
-            plt.savefig(
-                f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}.eps",
-                format="eps",
-            )
-            plt.close()
+        def plot_adjuster(height, width, dpi, figtitle):
+            fig = plt.gcf()
+            fig.set_figheight(height)
+            fig.set_figwidth(width)
+            fig.set_dpi(dpi)
+            fig.suptitle(figtitle, horizontalalignment="center")
+            # plt.tight_layout()
+            # set margins
+            plt.subplots_adjust(left=0.35, right=0.88, top=0.88, bottom=0.12)
 
-            # Check if the shap_values are numpy arrays or explainer objects
-            if isinstance(shap_values[leadtime], shap.Explanation):
-                shap_val_array = shap_values[leadtime].values
-            else:
-                shap_val_array = shap_values[leadtime]
-            # combined thermodynamic and dynamic features
-            temperature = np.sum(shap_val_array[:, [5], j], axis=1)[
-                :,
-                None,
+            # ax = plt.gca()
+            # # Set the left margin to 0.3
+            # ax.spines["left"].set_position(("axes", 0.3))
+
+        unique_leadtimes = list(shap_values.keys())
+        for j, target in enumerate(
+            [
+                "(mu) Maximum Wind",
+                "(sigma) Maximum Wind",
+                "(mu) Minimum SLP",
+                "(sigma) Minimum SLP",
             ]
-            pressure = np.sum(shap_val_array[:, [1, 3, 4, 8], j], axis=1)[
-                :,
-                None,
-            ]
-            wind = np.sum(shap_val_array[:, [0, 2, 7], j], axis=1)[:, None]
-            shap.summary_plot(
-                np.concatenate(
-                    [
-                        temperature,
-                        pressure,
-                        wind,
-                        shap_val_array[:, 6][:, None, j],
-                    ],
-                    axis=1,
-                ),
-                # shap_data[leadtime],
-                feature_names=np.array(
-                    ["T850 (range)", "Pressure Variables", "Wind Variables", "Leadtime"]
-                ),
-                plot_type="dot",
-                show=False,
-                color_bar=True,
-                alpha=0.75,
-            )
+        ):
+            for i, leadtime in enumerate([6, 12, 18, 24, 48, 72, 96, 120, 144, 168]):
+                shap.summary_plot(
+                    shap_values[leadtime][:, :, j],
+                    shap_data[leadtime],
+                    feature_names=np.array(shap_features),
+                    max_display=len(shap_features),
+                    plot_type="dot",
+                    show=False,
+                    color_bar=True,
+                    alpha=0.75,
+                    # ax=axs[i],
+                )
+                plot_adjuster(
+                    8,
+                    8,
+                    250,
+                    f"{model['tag']} - {leadtime}h ldt - {target}\nSHAP Values",
+                )
 
-            plot_adjuster(
-                4,
-                8,
-                250,
-                f"{model['tag']} - {leadtime}h ldt - {target}\nVariable Grouping SHAP Values",
-            )
-            plt.savefig(
-                f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}_vartype.eps",
-                format="eps",
-            )
-            plt.close()
+                # plt.show()
+                if not os.path.exists(os.path.join(results_dir, "shap")):
+                    os.makedirs(os.path.join(results_dir, "shap"))
+                plt.savefig(
+                    f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}.eps",
+                    format="eps",
+                )
+                plt.close()
 
-            # combined neural weather model features
-            newm_shapval = np.sum(shap_val_array[:, [0, 1, 2, 3, 4, 5], j], axis=1)[
-                :, None
-            ]
-            scalar_shapval = np.sum(shap_val_array[:, [6, 7, 8], j], axis=1)[:, None]
-            shap.summary_plot(
-                np.concatenate(
-                    [newm_shapval, scalar_shapval],
-                    axis=1,
-                ),
-                # shap_data[leadtime],
-                feature_names=np.array(["Neural Weather Model", "IBTrACS Scalars"]),
-                plot_type="dot",
-                show=False,
-                color_bar=True,
-                alpha=0.75,
-            )
-            plot_adjuster(
-                4,
-                8,
-                250,
-                f"{model['tag']} - {leadtime}h ldt - {target}\nVariable Grouping SHAP Values",
-            )
-            plt.savefig(
-                f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}_neural_vs_scalar.eps",
-                format="eps",
-            )
-            plt.close()
+                # Check if the shap_values are numpy arrays or explainer objects
+                if isinstance(shap_values[leadtime], shap.Explanation):
+                    shap_val_array = shap_values[leadtime].values
+                else:
+                    shap_val_array = shap_values[leadtime]
+                # combined thermodynamic and dynamic features
+                temperature = np.sum(shap_val_array[:, [5], j], axis=1)[
+                    :,
+                    None,
+                ]
+                pressure = np.sum(shap_val_array[:, [1, 3, 4, 8], j], axis=1)[
+                    :,
+                    None,
+                ]
+                wind = np.sum(shap_val_array[:, [0, 2, 7], j], axis=1)[:, None]
+                shap.summary_plot(
+                    np.concatenate(
+                        [
+                            temperature,
+                            pressure,
+                            wind,
+                            shap_val_array[:, 6][:, None, j],
+                        ],
+                        axis=1,
+                    ),
+                    # shap_data[leadtime],
+                    feature_names=np.array(
+                        [
+                            "T850 (range)",
+                            "Pressure Variables",
+                            "Wind Variables",
+                            "Leadtime",
+                        ]
+                    ),
+                    plot_type="dot",
+                    show=False,
+                    color_bar=True,
+                    alpha=0.75,
+                )
 
-            # input()
+                plot_adjuster(
+                    4,
+                    8,
+                    250,
+                    f"{model['tag']} - {leadtime}h ldt - {target}\nVariable Grouping SHAP Values",
+                )
+                plt.savefig(
+                    f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}_vartype.eps",
+                    format="eps",
+                )
+                plt.close()
+
+                # combined neural weather model features
+                newm_shapval = np.sum(shap_val_array[:, [0, 1, 2, 3, 4, 5], j], axis=1)[
+                    :, None
+                ]
+                scalar_shapval = np.sum(shap_val_array[:, [6, 7, 8], j], axis=1)[
+                    :, None
+                ]
+                shap.summary_plot(
+                    np.concatenate(
+                        [newm_shapval, scalar_shapval],
+                        axis=1,
+                    ),
+                    # shap_data[leadtime],
+                    feature_names=np.array(["Neural Weather Model", "IBTrACS Scalars"]),
+                    plot_type="dot",
+                    show=False,
+                    color_bar=True,
+                    alpha=0.75,
+                )
+                plot_adjuster(
+                    4,
+                    8,
+                    250,
+                    f"{model['tag']} - {leadtime}h ldt - {target}\nVariable Grouping SHAP Values",
+                )
+                plt.savefig(
+                    f"{os.path.join(results_dir, 'shap')}/shap_{leadtime}h_{target}_{model['tag']}_neural_vs_scalar.eps",
+                    format="eps",
+                )
+                plt.close()
+
+                # input()
 
 
 # %%
