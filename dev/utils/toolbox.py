@@ -164,6 +164,27 @@ def axis_generator(**kwargs):
     return lat_vector, lon_vector
 
 
+def regression_2_RI(track_df, **kwargs):
+    df_mode = kwargs.get("mode", "ibtracs")
+    if df_mode == "ibtracs":
+        cols = {
+            "SID": "SID",
+            "lat": "LAT",
+            "lon": "LON",
+            "initial_time": "ISO_TIME",
+        }
+    elif df_mode == "preds":
+        cols = {
+            "SID": "SID",
+            "lat": "lat",
+            "lon": "lon",
+            "initial_time": "Initial Time",
+            "valid_time": "Valid Time",
+        }
+    else:
+        raise ValueError(f"Invalid mode: {df_mode}. Expected 'ibtracs' or 'preds'.")
+
+
 def fnv1a_hash(data):
     # FNV-1a 32-bit hash parameters
     fnv_prime = 0x01000193
@@ -286,6 +307,26 @@ def haversine(latp, lonp, lat_list, lon_list, **kwargs):
     a = np.where(np.sqrt(a) <= 1, a, np.sign(a))
 
     return 2 * 6371 * np.arcsin(np.sqrt(a))
+
+
+def latlon_2_cartesian(lat, lon, **kwargs):
+    """
+    Convert lat/lon coordinates to cartesian coordinates for the along-track
+    and cross track error
+
+    Inputs:
+        lat - latitude of points
+        lon - longitude of points
+
+    Outputs:
+        x, y - cartesian coordinates of points
+    """
+    lat_radians = np.radians(lat)
+
+    x = kwargs.get("radius", 6371) * np.cos(lat_radians) * lon * lat
+    y = kwargs.get("radius", 6371) * lat_radians
+
+    return x, y
 
 
 # %%

@@ -259,8 +259,11 @@ if __name__ == "__main__":
         default=None,
         help="Path to the saved model to load",
     )
+    parser.add_argument("--test-set", action="store_true", help="Use the test set instead of the validation set")
 
     args = parser.parse_args()
+
+    source_set = "test" if args.test_set else "validation"
 
     print("Imports successful", flush=True)
 
@@ -327,25 +330,25 @@ if __name__ == "__main__":
 
     if args.dask_array:
         # Load the data from the zarr store using dask array
-        valid_data = da.from_zarr(zarr_store, component="validation/masked_AIX")
-        valid_target = da.from_zarr(zarr_store, component="validation/target_scaled")
+        valid_data = da.from_zarr(zarr_store, component="{source_set}/masked_AIX")
+        valid_target = da.from_zarr(zarr_store, component="{source_set}/target_scaled")
         train_leadtimes = da.from_zarr(zarr_store, component="train/leadtime_scaled")
         validation_leadtimes = da.from_zarr(
-            zarr_store, component="validation/leadtime_scaled"
+            zarr_store, component="{source_set}/leadtime_scaled"
         )
         train_base_intensity = da.from_zarr(
             zarr_store, component="train/base_intensity_scaled"
         )
         valid_base_intensity = da.from_zarr(
-            zarr_store, component="validation/base_intensity_scaled"
+            zarr_store, component="{source_set}/base_intensity_scaled"
         )
         train_base_position = da.from_zarr(zarr_store, component="train/base_position")
         valid_base_position = da.from_zarr(
-            zarr_store, component="validation/base_position"
+            zarr_store, component="{source_set}/base_position"
         )
         train_unscaled_leadtimes = da.from_zarr(zarr_store, component="train/leadtime")
         validation_unscaled_leadtimes = da.from_zarr(
-            zarr_store, component="validation/leadtime"
+            zarr_store, component="{source_set}/leadtime"
         )
     else:
         # load data with zarr
@@ -489,6 +492,8 @@ if __name__ == "__main__":
         val_losses.append(val_loss)
 
     # %%
+
+
     # Save the results
     results_path = os.path.join(result_dir, "evaluation_results.pkl")
 
@@ -498,15 +503,19 @@ if __name__ == "__main__":
         "lead_times": unique_leadtimes,
         "val_losses": val_losses,
     }
-    with open(os.path.join(result_dir, "leadtime_decomposition.pkl"), "wb") as f:
+    with open(os.path.join(result_dir, "{source_set}_leadtime_decomposition.pkl"), "wb") as f:
         pickle.dump(results, f)
     # %%
     #  Plotting
+    y_label = "Validation Loss" if not args.test_set else "Test Loss"
+    
     print("Plotting...", flush=True)
+    
+    
     fig, ax = plt.subplots()
     ax.plot(unique_leadtimes, val_losses)
     ax.set_xlabel("Leadtime (h)")
-    ax.set_ylabel("Validation Loss")
-    ax.set_title("Validation Loss vs. Leadtime")
-    fig.savefig(os.path.join(result_dir, "eval_results.png"))
+    ax.set_ylabel(y_label)
+    ax.set_title("{y_label} vs. Leadtime")
+    fig.savefig(os.path.join(result_dir, "eval_{source_set}_results.png"))
     # %%

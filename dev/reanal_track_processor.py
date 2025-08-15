@@ -16,12 +16,12 @@ from utils import data_lib as dlib
 import argparse
 
 # %% Load the seasons to process
-emulate = True
+emulate = False
 if emulate:
     sys.argv = [
         "reanal_track_processor.py",
         "--season",
-        "2008",
+        "2004",
     ]
 
 
@@ -37,14 +37,14 @@ parser.add_argument(
 args = parser.parse_args()
 
 # %%
-# seasons = toolbox.get_TC_seasons(
-#     season_list=[args.season],
-#     datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/ilia/",
-# )
 seasons = toolbox.get_TC_seasons(
-    season_list=[*range(2019, 2020)],
-    datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
+    season_list=[args.season],
+    datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/ilia/",
 )
+# seasons = toolbox.get_TC_seasons(
+#     season_list=[*range(2019, 2020)],
+#     datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
+# )
 
 # %% Control flags
 process = True
@@ -53,7 +53,10 @@ process = True
 input_samples = None
 target_samples = None
 for season, storms in seasons.items():
-    print(f"Starting to process {season}. which contains {len(storms)} storms...")
+    print(
+        f"Starting to process {season}. which contains {len(storms)} storms...",
+        flush=True,
+    )
 
     if process:
         # Load the data collection
@@ -62,7 +65,7 @@ for season, storms in seasons.items():
 
         # determine the number of processors that can be used
         # n_jobs = jl.cpu_count()
-        n_jobs = 8
+        n_jobs = 4
 
         # for storm in storms:
         #     storm.process_data_collection(
@@ -89,12 +92,12 @@ for season, storms in seasons.items():
                     "10m_u_component_of_wind",
                     "10m_v_component_of_wind",
                     "mean_sea_level_pressure",
-                    "temperature",
-                    "geopotential",
+                    # "temperature",
+                    # "geopotential",
                 ],
-                plevels={"temperature": [850], "geopotential": [500]},
+                # plevels={"temperature": [850], "geopotential": [500]},
                 masktype="rect",
-                circum_points=30 * 4,
+                circum_points=5 * 4,
                 n_jobs=n_jobs,
                 verbose=False,
             )

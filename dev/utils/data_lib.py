@@ -919,18 +919,34 @@ class AI_Data_Collection:
                 time_str = time_str.replace("h", ":").replace("m", "")
                 time_str = np.datetime64(time_str)
                 if date == time_str:
-                    ds_list.append(
-                        # time_to_validtime(
-                        #     xr.open_dataset(
-                        #         os.path.join(self.data_path, key, file),
-                        #     ),
-                        #     time_str,
-                        # )
-                        xr.open_dataset(
-                            os.path.join(self.data_path, key, file),
-                        ).chunk(chunk_opts)
-                    )
-        ds = xr.concat(ds_list, dim="time")
+                    try:
+                        ds_list.append(
+                            # time_to_validtime(
+                            #     xr.open_dataset(
+                            #         os.path.join(self.data_path, key, file),
+                            #     ),
+                            #     time_str,
+                            # )
+                            xr.open_dataset(
+                                os.path.join(self.data_path, key, file),
+                            ).chunk(chunk_opts)
+                        )
+                    except Exception as e:
+                        print(
+                            f"Error loading file {file} for date {date}: {e}",
+                            flush=True,
+                        )
+                        continue
+        # concatenate the datasets if there are any
+        if len(ds_list) > 1:
+            ds = xr.concat(ds_list, dim="time")
+        elif len(ds_list) == 1:
+            ds = ds_list[0]
+        else:
+            raise ValueError(
+                f"No files found for the requested dates: {dates}. "
+                "Please check the data collection object."
+            )
 
         if kwargs.get("strict_mode", False):
             assert len(ds_list) == len(
@@ -1002,13 +1018,14 @@ if __name__ == "__main__":
 
     # print(dc.meta_dfs)
 
-    # test = AI_Data_Collection(
-    #     "/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/AI-milton/panguweather"
-    # )
-    # datetimes = np.load(
-    #     "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/data/timestamps_sample.npy"
-    # )
-    # tst = test.retrieve_ds(datetimes)
+    test = AI_Data_Collection(
+        "/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/AI-milton/panguweather"
+    )
+    datetimes = np.load(
+        "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/data/timestamps_sample.npy"
+    )
+    datetimes = datetimes + np.timedelta64(366, "D")
+    tst = test.retrieve_ds(datetimes)
 
     # for i in range(tst.time.size // 4):
     #     fig = plt.figure()

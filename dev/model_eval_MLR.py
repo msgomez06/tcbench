@@ -19,6 +19,8 @@ import json
 import zarr as zr
 from itertools import cycle
 import shap
+import gc
+import pandas as pd
 
 
 # from dask import optimize
@@ -50,15 +52,16 @@ if __name__ == "__main__":
         sys.argv = [
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
             # "--ai_model",
+            # "panguweather",
             # "fourcastnetv2",
-            "--overwrite_cache",
+            # "--overwrite_cache",
             # "--min_leadtime",
             # "6",
             # "--max_leadtime",
             # "24",
             # "--use_gpu",
             # "--verbose",
-            "--reanalysis",
+            # "--reanalysis",
             # "--mode",
             # "probabilistic",
             "--cache_dir",
@@ -66,9 +69,19 @@ if __name__ == "__main__":
             # "/srv/scratch/mgomezd1/cache",
             "--magAngle_mode",
             "--dask_array",
-            # "--tag",
-            # "ANN_LeakyRelu",
+            "--tag",
+            # "pangu_validation-reval",
+            # "pangu_test-reval",
+            # "fcast_test-reval",
+            "fcast_valid-reval",
+            # "Pangu_validation-reval",
+            # "ERA5_validation-reval",
+            # "ERA5_test-reval",
             # "--shap",
+            # "--test-set",
+            "--report-global",
+            "--batch_size",
+            "17",
         ]
     # %%
     # check if the context has been set for torch multiprocessing
@@ -228,6 +241,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use SHAP for the model",
     )
+    parser.add_argument(
+        "--test-set",
+        action="store_true",
+        help="Use the test set instead of the validation set",
+    )
+    parser.add_argument(
+        "--report-global",
+        action="store_true",
+        help="Whether to report global (all leadtime) metrics",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size for deep evaluation",
+    )
 
     args = parser.parse_args()
 
@@ -243,6 +272,8 @@ if __name__ == "__main__":
         args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
     )
     result_dir = args.result_dir
+
+    source_set = "test" if args.test_set else "validation"
 
     # Check for GPU availability
     if torch.cuda.is_available() and not args.ignore_gpu:
@@ -266,12 +297,12 @@ if __name__ == "__main__":
     # Check that the training and validation groups exist, if not create them
     if "train" not in root:
         root.create_group("train")
-    if "validation" not in root:
-        root.create_group("validation")
+    if source_set not in root:
+        root.create_group(source_set)
 
     # Check if the data is already stored in the cache
     train_zarr = root["train"]
-    valid_zarr = root["validation"]
+    valid_zarr = root[source_set]
 
     train_arrays = list(train_zarr.array_keys())
     valid_arrays = list(valid_zarr.array_keys())
@@ -291,23 +322,23 @@ if __name__ == "__main__":
 
     if args.dask_array:
         # Load the data from the zarr store using dask array
-        valid_data = da.from_zarr(zarr_store, component="validation/masked_AIX")
+        valid_data = da.from_zarr(zarr_store, component=f"{source_set}/masked_AIX")
         unmasked_valid_data = da.from_zarr(
-            zarr_store, component="validation/AIX_scaled"
+            zarr_store, component=f"{source_set}/AIX_scaled"
         )
-        valid_target = da.from_zarr(zarr_store, component="validation/target_scaled")
+        valid_target = da.from_zarr(zarr_store, component=f"{source_set}/target_scaled")
         validation_leadtimes = da.from_zarr(
-            zarr_store, component="validation/leadtime_scaled"
+            zarr_store, component=f"{source_set}/leadtime_scaled"
         )
 
         valid_base_intensity = da.from_zarr(
-            zarr_store, component="validation/base_intensity_scaled"
+            zarr_store, component=f"{source_set}/base_intensity_scaled"
         )
         valid_base_position = da.from_zarr(
-            zarr_store, component="validation/base_position"
+            zarr_store, component=f"{source_set}/base_position"
         )
         validation_unscaled_leadtimes = da.from_zarr(
-            zarr_store, component="validation/leadtime"
+            zarr_store, component=f"{source_set}/leadtime"
         )
         # Load the training targets and unscaled leadtimes for climatology
         train_target = da.from_zarr(zarr_store, component="train/target_scaled")
@@ -335,35 +366,50 @@ if __name__ == "__main__":
 
     if args.overwrite_cache or not os.path.exists(result_file):
         print("Calculating...", flush=True)
-        valid_maxima = valid_data.max(axis=(-2, -1)).compute(scheduler="threads")
-        valid_minima = valid_data.min(axis=(-2, -1)).compute(scheduler="threads")
-        unmasked_valid_maxima = unmasked_valid_data.max(axis=(-2, -1)).compute(
-            scheduler="threads"
-        )
-        unmasked_valid_minima = unmasked_valid_data.min(axis=(-2, -1)).compute(
-            scheduler="threads"
-        )
+        if args.dask_array:
+            valid_maxima = valid_data.max(axis=(-2, -1)).compute(scheduler="threads")
+            valid_minima = valid_data.min(axis=(-2, -1)).compute(scheduler="threads")
+            unmasked_valid_maxima = unmasked_valid_data.max(axis=(-2, -1)).compute(
+                scheduler="threads"
+            )
+            unmasked_valid_minima = unmasked_valid_data.min(axis=(-2, -1)).compute(
+                scheduler="threads"
+            )
+        else:
+            valid_maxima = np.max(valid_data, axis=(-2, -1))
+            valid_minima = np.min(valid_data, axis=(-2, -1))
+            unmasked_valid_maxima = np.max(unmasked_valid_data, axis=(-2, -1))
+            unmasked_valid_minima = np.min(unmasked_valid_data, axis=(-2, -1))
 
         valid_range = valid_maxima - valid_minima
         unmasked_valid_range = unmasked_valid_maxima - unmasked_valid_minima
 
         # -------------------------------
-        validation_leadtimes = validation_leadtimes.compute(scheduler="threads")
-        valid_base_intensity = valid_base_intensity.compute(scheduler="threads")
-        validation_unscaled_leadtimes = validation_unscaled_leadtimes.compute(
-            scheduler="threads"
-        )
-        unique_leadtimes = np.unique(validation_unscaled_leadtimes)
-        valid_target = valid_target.compute(scheduler="threads")
+        if args.dask_array:
+            validation_leadtimes = validation_leadtimes.compute(scheduler="threads")
+            valid_base_intensity = valid_base_intensity.compute(scheduler="threads")
+            validation_unscaled_leadtimes = validation_unscaled_leadtimes.compute(
+                scheduler="threads"
+            )
+            unique_leadtimes = np.unique(validation_unscaled_leadtimes)
+            valid_target = valid_target.compute(scheduler="threads")
 
-        train_target = train_target.compute(scheduler="threads")
-        train_leadtimes = train_leadtimes.compute(scheduler="threads")
+            train_target = train_target.compute(scheduler="threads")
+            train_leadtimes = train_leadtimes.compute(scheduler="threads")
 
+            deep_scalars = np.hstack(
+                [valid_base_intensity, valid_base_position, validation_leadtimes]
+            ).compute(scheduler="threads")
+        else:
+            unique_leadtimes = np.unique(validation_unscaled_leadtimes)
+            valid_target = valid_target
+
+            train_target = train_target
+            train_leadtimes = train_leadtimes
+            deep_scalars = np.hstack(
+                [valid_base_intensity, valid_base_position, validation_leadtimes]
+            )
         # var order = ["W_mag", "W_dir", "mslp", "Z500", "T850"]
-
-        deep_scalars = np.hstack(
-            [valid_base_intensity, valid_base_position, validation_leadtimes]
-        ).compute(scheduler="threads")
 
         # -------------------------------
         valid_x = np.vstack(
@@ -394,6 +440,7 @@ if __name__ == "__main__":
 
         nan_idxs = np.isnan(valid_x).any(axis=1)
         valid_data = valid_data[~nan_idxs]
+        unmasked_valid_data
         deep_scalars = deep_scalars[~nan_idxs]
         valid_x = valid_x[~nan_idxs]
         unmasked_valid_target = valid_target.copy()
@@ -401,460 +448,450 @@ if __name__ == "__main__":
         validation_unscaled_leadtimes = validation_unscaled_leadtimes[~nan_idxs]
 
         unmasked_nan_idxs = np.isnan(unmasked_valid_x).any(axis=1)
+        unmasked_valid_data = unmasked_valid_data[~unmasked_nan_idxs]
         unmasked_valid_x = unmasked_valid_x[~unmasked_nan_idxs]
         unmasked_valid_target = unmasked_valid_target[~unmasked_nan_idxs]
 
         # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
-
-        # -------------------------------
-        models = [
-            # {
-            #     "filepath": f"{results_dir}TorchMLR_04-02-14h25_epoch-19_panguweather_deterministic_unmasked.pt",
-            #     "masked": False,
-            #     "probabilistic": False,
-            #     "tag": "unmasked MLR ",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}MLR_01-27-11h45_epoch-20_panguweather_probabilistic_prob_unmasked.pt",
-            #     "masked": False,
-            #     "probabilistic": True,
-            #     "tag": "unmasked MLR",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "masked MLR",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}best_model_TorchMLR_12-12-14h37_epoch-40_panguweather_deterministic MagMasked.pt",
-            #     "masked": True,
-            #     "probabilistic": False,
-            #     "tag": "masked MLR",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            ##############################
-            # Simple ANN
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_01-30-15h33_epoch-18_panguweather_probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "Tanh ANN",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_01-31-11h53_epoch-20_panguweather_probabilistic_masked.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "ANN (Hardswish)",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_01-31-11h47_epoch-13_panguweather_probabilistic_unmasked.pt",
-            #     "masked": False,
-            #     "probabilistic": True,
-            #     "tag": "Unmasked ANN (LeakyRelu)(PU)",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_02-03-08h29_epoch-15_panguweather_probabilistic_masked.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "ANN (LeakyReLU)",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_04-02-14h16_epoch-19_panguweather_deterministic_masked.pt",
-            #     "masked": True,
-            #     "probabilistic": False,
-            #     "tag": "ANN (LeakyReLU) (DM)",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            # {
-            #     "filepath": f"{results_dir}SimpleANN_04-02-14h22_epoch-7_panguweather_deterministic_unmasked.pt",
-            #     "masked": False,
-            #     "probabilistic": False,
-            #     "tag": "ANN (LeakyReLU) (DU)",
-            #     "results": [],
-            #     "deep": False,
-            # },
-            ##############################
-            # Probabilistic UNets
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-08h01_epoch-29_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 06",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-08h29_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 12",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-08h38_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 18",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-09h04_epoch-5_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 24",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-09h28_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 48",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-09h56_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 72",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-10h32_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 96",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-11h07_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 120",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-11h53_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 144",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_01-17-12h36_epoch-1_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 168",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            ##############################
-            # {
-            #     "filepath": f"{results_dir}UNet_0_01-24-16h37_epoch-8_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 6 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_1_01-24-16h48_epoch-3_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 12 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_2_01-24-16h56_epoch-10_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 18 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_3_01-24-17h25_epoch-3_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 24 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_4_01-24-17h49_epoch-3_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 48 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_5_01-24-18h18_epoch-7_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 72 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_6_01-24-18h54_epoch-5_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 96 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_7_01-24-19h29_epoch-3_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 120 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_8_01-24-20h07_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 144 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_9_01-24-20h46_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 168 dropout 50",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            ##############################
-            # {
-            #     "filepath": f"{results_dir}UNet_0_01-24-16h43_epoch-15_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 6 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_1_01-24-17h04_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 12 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_2_01-24-17h13_epoch-7_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 18 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_3_01-24-17h35_epoch-9_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 24 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_4_01-24-18h08_epoch-3_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 48 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_5_01-24-18h37_epoch-5_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 72 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_6_01-24-19h09_epoch-5_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 96 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_7_01-24-19h44_epoch-4_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 120 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_8_01-24-20h21_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 144 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_9_01-24-21h00_epoch-6_panguweather-probabilistic.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 168 dropout 75",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            ##############################
-            # {
-            #     "filepath": f"{results_dir}UNet_0_01-24-17h20_epoch-7_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 6 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_1_01-24-17h28_epoch-5_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 12 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_2_01-24-17h37_epoch-8_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 18 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_3_01-24-18h11_epoch-6_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 24 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_4_01-24-18h35_epoch-4_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 48 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_5_01-24-19h04_epoch-4_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 72 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_6_01-24-19h36_epoch-6_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 96 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_7_01-24-20h11_epoch-4_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 120 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_8_01-24-20h53_epoch-3_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 144 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            # {
-            #     "filepath": f"{results_dir}UNet_9_01-24-21h32_epoch-5_panguweather-probabilisticdout25.pt",
-            #     "masked": True,
-            #     "probabilistic": True,
-            #     "tag": "UNet 168 dropout 25",
-            #     "results": [],
-            #     "deep": True,
-            # },
-            ##############################
-            {
-                "filepath": f"{results_dir}TorchMLR_04-10-14h58_epoch-29_ERA5_probabilistic_masked.pt",
-                "masked": True,
-                "probabilistic": True,
-                "tag": "ERA5 IC Masked MLR",
-                "results": [],
-                "deep": False,
-            },
-            {
-                "filepath": f"{results_dir}SimpleANN_04-10-14h54_epoch-12_ERA5_probabilistic_masked.pt",
-                "masked": True,
-                "probabilistic": True,
-                "tag": "ERA5 IC Masked ANN",
-                "results": [],
-                "deep": False,
-            },
-            {
-                "filepath": f"{results_dir}TorchMLR_04-10-14h11_epoch-28_ERA5_deterministic_masked.pt",
-                "masked": True,
-                "probabilistic": False,
-                "tag": "ERA5 IC Masked MLR",
-                "results": [],
-                "deep": False,
-            },
-            {
-                "filepath": f"{results_dir}TorchMLR_04-10-14h11_epoch-6_ERA5_deterministic_masked.pt",
-                "masked": True,
-                "probabilistic": False,
-                "tag": "ERA5 IC Masked ANN",
-                "results": [],
-                "deep": False,
-            },
-        ]
+        if args.ai_model == "panguweather" and not args.reanalysis:
+            models = [
+                # --------------- Panguweather Linear Models ---------------
+                {
+                    "filepath": "best_model_TorchMLR_12-12-15h15_epoch-40_panguweather_deterministic MagUnmasked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "Masked MLR (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_03-26-10h27_epoch-20_panguweather_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "Masked MLR (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-02-15h06_epoch-30_panguweather_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "Unmasked MLR (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-02-14h25_epoch-20_panguweather_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "Unmasked MLR (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-02-14h22_epoch-8_panguweather_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "Unmasked ANN (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_01-31-11h47_epoch-14_panguweather_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "Unmasked ANN (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_02-03-08h29_epoch-14_panguweather_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "Masked ANN (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-02-14h16_epoch-20_panguweather_deterministic_masked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "Masked ANN (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                # -------- Pangu Deep-----
+                ##             {
+                ##     "filepath": "Regularized_CNN_04-02-10h47_epoch-19_panguweather-deterministic.pt",
+                ##     "masked": True,
+                ##     "probabilistic": False,
+                ##     "tag": "Masked Regularized CNN (Deterministic)",
+                ##     "results": [],
+                ##     "deep": True,
+                ## },
+                ## {
+                ##     "filepath": "Regularized_CNN_04-02-13h23_epoch-13_panguweather-probabilistic.pt",
+                ##     "masked": True,
+                ##     "probabilistic": True,
+                ##     "tag": "Masked Regularized CNN (Probabilistic)",
+                ##     "results": [],
+                ##     "deep": True,
+                ## },
+                ## {
+                ##     "filepath": "Regularized_CNN_04-02-11h56_epoch-14_panguweather-deterministic.pt",
+                ##     "masked": False,
+                ##     "probabilistic": False,
+                ##     "tag": "Unmasked Regularized CNN (Deterministic)",
+                ##     "results": [],
+                ##     "deep": True,
+                ## },
+                ## {
+                ##     "filepath": "Regularized_CNN_04-02-14h23_epoch-4_panguweather-probabilistic.pt",
+                ##     "masked": False,
+                ##     "probabilistic": True,
+                ##     "tag": "Unmasked Regularized CNN (Probabilistic)",
+                ##     "results": [],
+                ##     "deep": True,
+                ## },
+                {
+                    "filepath": "Regularized_CNN_06-25-12h56_epoch-40_panguweather-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "Masked Regularized CNN (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-25-17h13_epoch-17_panguweather-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "Masked Regularized CNN (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-25-15h08_epoch-40_panguweather-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "Unmasked Regularized CNN (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-25-18h08_epoch-1_panguweather-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "Unmasked Regularized CNN (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-18-16h30_epoch-16_panguweather-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "Masked UNet (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-18-20h11_epoch-6_panguweather-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "Masked UNet (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-18-18h33_epoch-6_panguweather-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "Unmasked UNet (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-18-21h50_epoch-4_panguweather-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "Unmasked UNet (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+            ]
+        elif args.ai_model == "fourcastnetv2" and not args.reanalysis:
+            models = [
+                # --------------- FourcastNet Linear Models ---------------
+                {
+                    "filepath": "TorchMLR_04-02-14h36_epoch-30_fourcastnetv2_deterministic_masked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked MLR (deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_01-31-12h20_epoch-20_fourcastnetv2_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked MLR (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-02-14h54_epoch-30_fourcastnetv2_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked MLR (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_01-31-12h05_epoch-20_fourcastnetv2_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked MLR (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-02-14h43_epoch-6_fourcastnetv2_deterministic_masked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked ANN (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_02-03-08h36_epoch-13_fourcastnetv2_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked ANN (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-02-14h46_epoch-20_fourcastnetv2_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked ANN (Deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_01-31-11h42_epoch-13_fourcastnetv2_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked ANN (Probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                # --------------- FourcastNet Deep Models ---------------
+                {
+                    "filepath": "Regularized_CNN_06-25-19h04_epoch-39_fourcastnetv2-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked CNN (deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-25-23h12_epoch-16_fourcastnetv2-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked CNN (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-25-21h09_epoch-33_fourcastnetv2-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked CNN (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_06-26-00h08_epoch-9_fourcastnetv2-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked CNN (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-25-09h49_epoch-25_fourcastnetv2-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked UNet (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-24-16h26_epoch-9_fourcastnetv2-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked UNet (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-25-12h00_epoch-5_fourcastnetv2-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked UNet (Deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_06-24-17h54_epoch-3_fourcastnetv2-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked UNet (Probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+            ]
+        elif args.reanalysis:
+            models = [
+                # --------------- ERA5 Linear Models ---------------
+                {
+                    "filepath": "TorchMLR_04-10-14h11_epoch-29_ERA5_deterministic_masked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked MLR (deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-10-14h58_epoch-30_ERA5_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked MLR (probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-10-14h01_epoch-30_ERA5_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked MLR (deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "TorchMLR_04-10-14h38_epoch-30_ERA5_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked MLR (probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-10-14h19_epoch-7_ERA5_deterministic_masked.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked ANN (deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-10-14h24_epoch-13_ERA5_probabilistic_masked.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked ANN (probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-10-13h59_epoch-5_ERA5_deterministic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked ANN (deterministic)",
+                    "results": [],
+                    "deep": False,
+                },
+                {
+                    "filepath": "SimpleANN_04-10-14h46_epoch-19_ERA5_probabilistic_unmasked.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked ANN (probabilistic)",
+                    "results": [],
+                    "deep": False,
+                },
+                # --------------- ERA5 Deep Models ---------------
+                {
+                    "filepath": "Regularized_CNN_07-23-15h40_epoch-29_ERA5-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked CNN (deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_07-24-12h09_epoch-11_ERA5-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked CNN (probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_07-24-10h57_epoch-12_ERA5-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked CNN (deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "Regularized_CNN_07-24-13h36_epoch-14_ERA5-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked CNN (probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_07-24-15h13_epoch-7_ERA5-deterministic.pt",
+                    "masked": True,
+                    "probabilistic": False,
+                    "tag": "masked UNet (deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_07-24-16h26_epoch-4_ERA5-probabilistic.pt",
+                    "masked": True,
+                    "probabilistic": True,
+                    "tag": "masked UNet (probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_07-24-15h48_epoch-4_ERA5-deterministic.pt",
+                    "masked": False,
+                    "probabilistic": False,
+                    "tag": "unmasked UNet (deterministic)",
+                    "results": [],
+                    "deep": True,
+                },
+                {
+                    "filepath": "UNet_v2_07-24-17h01_epoch-3_ERA5-probabilistic.pt",
+                    "masked": False,
+                    "probabilistic": True,
+                    "tag": "unmasked UNet (probabilistic)",
+                    "results": [],
+                    "deep": True,
+                },
+            ]
 
         # Load each pytorch model into the models dictionary
         for model in models:
             model["model"] = torch.load(
-                os.path.join(results_dir, model["filepath"]), map_location=calc_device
+                os.path.join(results_dir, "torch_models", model["filepath"]),
+                map_location=calc_device,
             )
+            model["model"].eval()
             model["shap_values"] = {}
             model["shap_data"] = {}
             model["shap_features"] = {}
@@ -870,13 +907,134 @@ if __name__ == "__main__":
         # Evaluate the models
         climatology_results = {"deterministic": [], "probabilistic": []}
         persistence_results = {"deterministic": [], "probabilistic": []}
+
+        if args.report_global:
+            if args.dask_array:
+                valid_data = valid_data.compute(scheduler="threads")
+                unmasked_valid_data = unmasked_valid_data.compute(scheduler="threads")
+            for model in models:
+                print(f"Evaluating model {model['tag']} on the validation set...")
+                if model["probabilistic"]:
+                    loss_fn = metrics.CRPS_ML
+                else:
+                    if args.deterministic_loss == "MSE":
+                        loss_fn = torch.nn.MSELoss()
+                    elif args.deterministic_loss == "MAE":
+                        loss_fn = torch.nn.L1Loss()
+                    else:
+                        raise ValueError("Loss function not recognized.")
+
+                if model["masked"]:
+                    if not model["deep"]:
+                        with torch.no_grad():
+                            prediction = model["model"](
+                                torch.tensor(valid_x, dtype=torch.float32).to(
+                                    calc_device
+                                )
+                            )
+                    else:
+                        # Work by batches
+                        batch_size = args.batch_size
+                        len_data = valid_data.shape[0]
+                        num_dims = len(valid_data.shape)
+
+                        with torch.no_grad():
+                            prediction_list = []
+                            for i in range(0, len_data, batch_size):
+                                temp_x = valid_data[i : i + batch_size]
+                                temp_scalars = deep_scalars[i : i + batch_size]
+                                if len(temp_x.shape) < num_dims:
+                                    temp_x = np.expand_dims(temp_x, axis=0)
+                                    temp_scalars = np.expand_dims(temp_scalars, axis=0)
+                                prediction = model["model"](
+                                    torch.tensor(
+                                        temp_x,
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                    torch.tensor(
+                                        temp_scalars,
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                )
+                                prediction_list.append(
+                                    prediction.cpu().detach().numpy()
+                                )
+                                # Simple progress bar
+                                print(
+                                    f"{i}/{len_data}",
+                                    end="\r",
+                                    flush=True,
+                                )
+
+                            prediction = np.vstack(prediction_list, dtype=np.float32)
+                            prediction = torch.tensor(prediction).to(calc_device)
+                else:
+                    if not model["deep"]:
+                        with torch.no_grad():
+                            prediction = model["model"](
+                                torch.tensor(unmasked_valid_x, dtype=torch.float32).to(
+                                    calc_device
+                                )
+                            )
+                    else:
+                        # Work by batches
+                        batch_size = args.batch_size
+                        len_data = unmasked_valid_data.shape[0]
+                        num_dims = len(unmasked_valid_data.shape)
+
+                        with torch.no_grad():
+                            prediction_list = []
+                            for i in range(0, len_data, batch_size):
+                                temp_x = unmasked_valid_data[i : i + batch_size]
+                                temp_scalars = deep_scalars[i : i + batch_size]
+                                if len(temp_x.shape) < num_dims:
+                                    temp_x = np.expand_dims(temp_x, axis=0)
+                                    temp_scalars = np.expand_dims(temp_scalars, axis=0)
+
+                                prediction = model["model"](
+                                    torch.tensor(
+                                        temp_x,
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                    torch.tensor(
+                                        temp_scalars,
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                )
+                                prediction_list.append(
+                                    prediction.cpu().detach().numpy()
+                                )
+                                # Simple progress bar
+                                print(
+                                    f"{i}/{len_data}",
+                                    end="\r",
+                                    flush=True,
+                                )
+
+                            prediction = np.vstack(prediction_list, dtype=np.float32)
+                            prediction = torch.tensor(prediction).to(calc_device)
+
+                prediction = prediction.cpu().detach().numpy()
+                with torch.no_grad():
+                    model["global results"] = loss_fn(
+                        torch.tensor(prediction, dtype=torch.float32),
+                        torch.tensor(unmasked_valid_target, dtype=torch.float32),
+                    )
+
         for unique_leadtime in unique_leadtimes:
             bool_idxs = (validation_unscaled_leadtimes == unique_leadtime).squeeze()
             temp_x = valid_x[bool_idxs]
             temp_unmasked_x = unmasked_valid_x[bool_idxs]
             temp_target = valid_target[bool_idxs]
 
-            temp_deepx = valid_data[bool_idxs].compute(scheduler="threads")
+            if not args.report_global and args.dask_array:
+                temp_deepx = valid_data[bool_idxs].compute(scheduler="threads")
+                temp_deepunmasked = unmasked_valid_data[bool_idxs].compute(
+                    scheduler="threads"
+                )
+            else:
+                temp_deepx = valid_data[bool_idxs]
+                temp_deepunmasked = unmasked_valid_data[bool_idxs]
             temp_scalars = deep_scalars[bool_idxs]
             print(temp_deepx.shape, temp_scalars.shape, temp_target.shape)
 
@@ -976,7 +1134,7 @@ if __name__ == "__main__":
 
                     else:
                         # Work by batches
-                        batch_size = 16
+                        batch_size = args.batch_size
                         len_data = temp_deepx.shape[0]
 
                         with torch.no_grad():
@@ -1017,7 +1175,6 @@ if __name__ == "__main__":
                                     calc_device
                                 )
                             )
-
                         num_samples = len(temp_x)
 
                         if args.shap:
@@ -1046,14 +1203,45 @@ if __name__ == "__main__":
                                 "Base Intensity",
                             ]
                     else:
-                        prediction = model["model"](
-                            torch.tensor(temp_deepx, dtype=torch.float32).to(
-                                calc_device
-                            ),
-                            torch.tensor(temp_scalars, dtype=torch.float32).to(
-                                calc_device
-                            ),
-                        )
+
+                        # Work by batches
+                        batch_size = args.batch_size
+                        len_data = temp_deepunmasked.shape[0]
+
+                        with torch.no_grad():
+                            prediction_list = []
+                            for i in range(0, len_data, batch_size):
+                                prediction = model["model"](
+                                    torch.tensor(
+                                        temp_deepunmasked[i : i + batch_size],
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                    torch.tensor(
+                                        temp_scalars[i : i + batch_size],
+                                        dtype=torch.float32,
+                                    ).to(calc_device),
+                                )
+                                prediction_list.append(
+                                    prediction.cpu().detach().numpy()
+                                )
+                                # Simple progress bar
+                                print(
+                                    f"{i}/{len_data}",
+                                    end="\r",
+                                    flush=True,
+                                )
+
+                            prediction = np.vstack(prediction_list, dtype=np.float32)
+                            prediction = torch.tensor(prediction).to(calc_device)
+
+                        # prediction = model["model"](
+                        #     torch.tensor(temp_deepunmasked, dtype=torch.float32).to(
+                        #         calc_device
+                        #     ),
+                        #     torch.tensor(temp_scalars, dtype=torch.float32).to(
+                        #         calc_device
+                        #     ),
+                        # )
                 loss = loss_func(
                     prediction,
                     torch.tensor(temp_target, dtype=torch.float32).to(calc_device),
@@ -1061,6 +1249,7 @@ if __name__ == "__main__":
                 model["results"].append(loss.item())
                 loss = None
             del temp_x, temp_unmasked_x, temp_target, temp_deepx, temp_scalars
+            gc.collect()
 
         # delete the torch models from the model list
         for model in models:
@@ -1083,6 +1272,69 @@ if __name__ == "__main__":
             climatology_results = data["climatology_results"]
             persistence_results = data["persistence_results"]
             unique_leadtimes = data["unique_leadtimes"]
+
+# %%
+# Format results into CSV for use with pgfplots
+
+filename = f"{results_dir}model_comparison_leadtime_{args.tag}.csv"
+# Make the dataframe with leadtimes from unique leadtimes
+df = pd.DataFrame(unique_leadtimes, columns=["Leadtime"], dtype=int)
+for model in models:
+    print(f"Adding model {model['tag']} results to dataframe.")
+    if model["probabilistic"]:
+        df[model["tag"]] = model["results"]
+    else:
+        df[model["tag"]] = model["results"]
+df.to_csv(filename, index=False)
+
+# %%
+# do the same for climatology and persistence results
+baseline_df = pd.DataFrame(
+    columns=["Leadtime", "Climatology (Deterministic)", "Climatology (Probabilistic)"]
+)
+baseline_df["Leadtime"] = unique_leadtimes
+baseline_df["Climatology (Deterministic)"] = climatology_results["deterministic"]
+baseline_df["Climatology (Probabilistic)"] = climatology_results["probabilistic"]
+baseline_df["Persistence (Deterministic)"] = persistence_results["deterministic"]
+baseline_df["Persistence (Probabilistic)"] = persistence_results["probabilistic"]
+
+baseline_df.to_csv(f"{results_dir}model_comparison_baselines.csv", index=False)
+
+# %%
+if args.report_global:
+    filename = f"{results_dir}model_comparison_global_{args.tag}.csv"
+    global_df = pd.DataFrame(
+        columns=["Model", f"{'Test' if args.test_set else 'Validation'} Result"]
+    )
+    for model in models:
+        value = np.nan
+        if "global results" in model:
+            value = model["global results"].item()
+        global_df.loc[-1] = [
+            model["tag"],
+            value,
+        ]
+        global_df.index += 1  # Shift index
+
+    global_df = global_df.sort_index()
+    global_df.to_csv(filename, index=False)
+
+    # do the same for climatology and persistence results
+
+# %%
+
+
+# Print out the global results
+if args.report_global:
+    print("\nGlobal results:")
+    for model in models:
+        if "global results" in model:
+            print(
+                f"{model['filepath']}:\n"
+                f"{model['tag']}: {model['global results'].item()} \n"
+            )
+        else:
+            print(f"{model['tag']}: No global results available.\n")
 
 
 # %%

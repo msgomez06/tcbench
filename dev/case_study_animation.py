@@ -87,7 +87,7 @@ if __name__ == "__main__":
     ai_model = "panguweather"
     # mode = "deep"  # "MLR" or "deep"
 
-    cache_dir = f"/scratch/mgomezd1/cache_{ai_model}"
+    cache_dir = f"/scratch/mgomezd1/cache/_{ai_model}"
 
     magangle = True
 
@@ -128,16 +128,32 @@ if __name__ == "__main__":
 
     # Load the MLR model
     models_to_load = [
+        # {
+        #     "filepath": f"{results_dir+'torch_models/'}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
+        #     "masked": True,
+        #     "probabilistic": True,
+        #     "tag": "masked MLR",
+        #     "results": {},
+        #     "deep": False,
+        # },
         {
-            "filepath": f"{results_dir}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
+            "filepath": f"{results_dir+'torch_models/'}TorchMLR_03-26-10h27_epoch-20_panguweather_probabilistic_masked.pt",
             "masked": True,
             "probabilistic": True,
-            "tag": "masked MLR",
+            "tag": "MLR (Masked)",
             "results": {},
             "deep": False,
         },
+        # {
+        #     "filepath": f"{results_dir+'torch_models/'}SimpleANN_03-28-14h49_epoch-20_panguweather_probabilistic_masked.pt",
+        #     "masked": True,
+        #     "probabilistic": True,
+        #     "tag": "ANN (LeakyReLU, M)",
+        #     "results": {},
+        #     "deep": False,
+        # },
         {
-            "filepath": f"{results_dir}SimpleANN_03-28-14h49_epoch-20_panguweather_probabilistic_masked.pt",
+            "filepath": f"{results_dir+'torch_models/'}SimpleANN_02-03-08h29_epoch-14_panguweather_probabilistic_masked.pt",
             "masked": True,
             "probabilistic": True,
             "tag": "ANN (LeakyReLU, M)",
@@ -153,7 +169,7 @@ if __name__ == "__main__":
         #     "deep": True,
         # },
         {
-            "filepath": f"{results_dir}UNet_v2_03-31-10h41_epoch-12_panguweather-probabilistic.pt",
+            "filepath": f"{results_dir+'torch_models/'}UNet_v2_03-31-10h41_epoch-12_panguweather-probabilistic.pt",
             "masked": True,
             "probabilistic": True,
             "tag": "UNetv2 (dout 0.33)",

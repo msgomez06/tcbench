@@ -9,6 +9,7 @@ with multiple pressure levels.
 @author: mgomezd1
 """
 # %%
+from unittest import case
 import cdsapi
 import os
 import argparse
@@ -78,7 +79,20 @@ months = [
     f"{args.month:02d}",
 ]
 
-days = json.loads(args.days)
+# if statement to get the list of days according to the month - ignore arguments
+if args.month in [1, 3, 5, 7, 8, 10, 12]:
+    days = [f"{day:02d}" for day in range(1, 32)]
+elif args.month in [4, 6, 9, 11]:
+    days = [f"{day:02d}" for day in range(1, 31)]
+elif args.month == 2:
+    if args.year % 4 == 0 and (args.year % 100 != 0 or args.year % 400 == 0):
+        days = [f"{day:02d}" for day in range(1, 30)]  # leap year
+    else:
+        days = [f"{day:02d}" for day in range(1, 29)]
+else:
+    raise ValueError("Invalid month provided. Please provide a valid month (1-12).")
+
+# days = json.loads(args.days)
 
 directory_path = args.download_path
 if not directory_path.endswith("/"):
@@ -86,7 +100,7 @@ if not directory_path.endswith("/"):
 if not os.path.exists(directory_path):
     os.makedirs(directory_path)
 
-filename = f"ERA5_{args.year}-{args.month:02d}_{args.source}.grib"
+filename = f"ERA5_{args.year}-{args.month:02d}_{args.source}_{datavars[0]}.nc"
 target_path = os.path.join(directory_path, filename)
 if os.path.exists(target_path):
     print(f"File {filename} already exists")
@@ -95,7 +109,7 @@ if os.path.exists(target_path):
 
 data_params = {
     "product_type": ["reanalysis"],
-    "data_format": "grib", #"netcdf",
+    "data_format": "netcdf",  # "grib"
     "variable": datavars,
     "year": years,
     "month": months,

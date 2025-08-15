@@ -16,14 +16,14 @@ from utils import data_lib as dlib
 # %% Load the seasons to process
 
 seasons = toolbox.get_TC_seasons(
-    season_list=[*range(2016, 2021)],
+    season_list=[*range(2023, 2024)],
     datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
 )
 
 # %% Control flags
 
 process = True
-perfect_prog = True
+# perfect_prog = True
 
 # %% Process the tracks
 input_samples = None

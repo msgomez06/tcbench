@@ -61,7 +61,7 @@ if __name__ == "__main__":
     ai_model = "panguweather"
     magangle = True
 
-    cache_dir = f"/scratch/mgomezd1/cache_{ai_model}"
+    cache_dir = f"/scratch/mgomezd1/cache/_{ai_model}"
 
     AI_scaler = None
     fpath = os.path.join(cache_dir, "AI_scaler.pkl")
@@ -100,16 +100,32 @@ if __name__ == "__main__":
 
     # Load the MLR model
     models_to_load = [
+        # {
+        #     "filepath": f"{results_dir+'torch_models/'}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
+        #     "masked": True,
+        #     "probabilistic": True,
+        #     "tag": "masked MLR",
+        #     "results": {},
+        #     "deep": False,
+        # },
         {
-            "filepath": f"{results_dir}MLR_01-27-11h37_epoch-20_panguweather_probabilistic_prob_masked.pt",
+            "filepath": f"{results_dir+'torch_models/'}TorchMLR_03-26-10h27_epoch-20_panguweather_probabilistic_masked.pt",
             "masked": True,
             "probabilistic": True,
-            "tag": "masked MLR",
+            "tag": "MLR (Masked)",
             "results": {},
             "deep": False,
         },
+        # {
+        #     "filepath": f"{results_dir+'torch_models/'}SimpleANN_03-28-14h49_epoch-20_panguweather_probabilistic_masked.pt",
+        #     "masked": True,
+        #     "probabilistic": True,
+        #     "tag": "ANN (LeakyReLU, M)",
+        #     "results": {},
+        #     "deep": False,
+        # },
         {
-            "filepath": f"{results_dir}SimpleANN_03-28-14h49_epoch-20_panguweather_probabilistic_masked.pt",
+            "filepath": f"{results_dir+'torch_models/'}SimpleANN_02-03-08h29_epoch-14_panguweather_probabilistic_masked.pt",
             "masked": True,
             "probabilistic": True,
             "tag": "ANN (LeakyReLU, M)",
@@ -124,8 +140,16 @@ if __name__ == "__main__":
         #     "results": [],
         #     "deep": True,
         # },
+        # {
+        #     "filepath": f"{results_dir+'torch_models/'}UNet_v2_03-31-10h41_epoch-12_panguweather-probabilistic.pt",
+        #     "masked": True,
+        #     "probabilistic": True,
+        #     "tag": "UNetv2 (dout 0.33)",
+        #     "results": [],
+        #     "deep": True,
+        # },
         {
-            "filepath": f"{results_dir}UNet_v2_03-31-10h41_epoch-12_panguweather-probabilistic.pt",
+            "filepath": f"{results_dir+'torch_models/'}UNet_v2_06-18-20h11_epoch-6_panguweather-probabilistic.pt",
             "masked": True,
             "probabilistic": True,
             "tag": "UNetv2 (dout 0.33)",
@@ -138,7 +162,7 @@ if __name__ == "__main__":
         model["model"] = torch.load(model["filepath"], map_location=calc_device)
         model["model"].eval()
     # %%
-    fit = False  # Set to True to fit the models, False to load the models from disk
+    fit = True  # Set to True to fit the models, False to load the models from disk
     if fit:
         plotting_dict = {}
         initial_times = []
@@ -215,6 +239,147 @@ if __name__ == "__main__":
             forecast_positions = track.track[forecast_idx]
             forecast_positions = mlf.latlon_to_sincos(forecast_positions)
 
+            # Plot sample masked inputs
+            if False:
+                # Generate plots of masked inputs for 18, 72, and 120 hour leadtimes
+
+                # Create the colorblind-safe colormap
+
+                # Define the two user-defined colors (as RGB tuples or hex codes)
+                color1 = "#3DB7E9FF"  # Blue for low
+                color2 = "#D55E00FF"  # Orange for high
+                white = "#FFFFFF00"  # White color for diverging colormap
+
+                # Create a custom diverging colormap
+                colors = [
+                    color1,
+                    white,
+                    color2,
+                ]
+                cmap_name = "cblind_diverging"
+                diverging_cmap = mpl.colors.LinearSegmentedColormap.from_list(
+                    cmap_name, colors
+                )
+
+                # Sample the appropriate positions
+                positions = [0, 0, 0]
+                while not np.all(target_leadtime[positions] == [18, 72, 120]):
+                    start_pos = np.random.choice(
+                        np.where(target_leadtime[: target_leadtime.size - 50] == 6)[0]
+                    )
+                    positions = [start_pos + 2, start_pos + 5, start_pos + 7]
+
+                    max_val = ai_data[positions][:, 0].max()
+                    min_val = ai_data[positions][:, 0].min()
+                    if min_val > AI_scaler.mean_[0, 0, 0]:
+                        positions = [0, 0, 0]
+                    if max_val < AI_scaler.mean_[0, 0, 0]:
+                        positions = [0, 0, 0]
+
+                t_base = pd.to_datetime(base_time[positions[0]]).strftime(
+                    "%Y-%m-%d-%Hh%M"
+                )
+                # Code to make visualizations of the masked AI data
+                for position in positions:
+                    fig, ax = plt.subplots(
+                        1,
+                        1,
+                        figsize=(8, 10),
+                        dpi=200,
+                        subplot_kw={"projection": ccrs.PlateCarree()},
+                    )
+
+                    temp_ai = ai_data[position]
+                    # Make the masked inputs
+                    mask = mask_dict[target_leadtime[position]]
+                    temp_ai = AI_scaler.transform(temp_ai)
+                    temp_ai = ai_data[position] * mask
+                    temp_ai = AI_scaler.inverse_transform(temp_ai)
+
+                    # retrieve the base position for reference
+                    temp_base_pos = track.track[forecast_idx][position]
+                    # round to nearest quarter degree
+                    plotting_pos = np.round(temp_base_pos / 0.25).astype(int) * 0.25
+
+                    # retrieve the position at target time for reference
+                    temp_targettime = target_time[position]
+                    temp_target_idx = np.searchsorted(track_time, temp_targettime)
+                    temp_target_pos = track.track[temp_target_idx]
+
+                    # calculate the difference in position in quarter degrees
+                    diff_pos = temp_target_pos - temp_base_pos
+                    diff_pos = np.round(diff_pos / 0.25).astype(int)
+
+                    # calculate the pixel of the true location
+                    true_pixel = (121 - diff_pos[0], 121 + diff_pos[1])
+
+                    norm = mpl.colors.TwoSlopeNorm(
+                        vmin=0,
+                        vcenter=AI_scaler.mean_[0, 0, 0],
+                        vmax=max_val,
+                    )
+
+                    ax.imshow(
+                        temp_ai[0],
+                        # cmap="inferno",
+                        cmap=diverging_cmap,
+                        # vmax=14,
+                        norm=norm,
+                        extent=[
+                            plotting_pos[1] - 30,
+                            plotting_pos[1] + 30,
+                            plotting_pos[0] - 30,
+                            plotting_pos[0] + 30,
+                        ],
+                        transform=ccrs.PlateCarree(),
+                        origin="upper",
+                    )
+
+                    ax.add_feature(
+                        cfeature.COASTLINE,
+                        edgecolor="black",
+                        linewidth=0.5,
+                        zorder=10,
+                    )
+
+                    # draw a black plus sign at the true position
+                    ax.plot(
+                        temp_target_pos[1],
+                        temp_target_pos[0],
+                        marker="+",
+                        color="black",
+                        markersize=20,
+                        transform=ccrs.PlateCarree(),
+                    )
+                    # remove ticks
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+
+                    # set facecolor to transparent
+                    ax.set_facecolor("none")
+                    fig.set_facecolor("none")
+
+                    # add colorbar at the bottom, m/s, with 4 ticks
+
+                    cbar = fig.colorbar(
+                        ax.images[0],
+                        ax=ax,
+                        orientation="horizontal",
+                        pad=0.01,
+                        aspect=50,
+                        ticks=[0, 5, 10, 15],
+                    )
+                    text_weight = 28
+                    cbar.ax.tick_params(labelsize=text_weight)
+
+                    # set label size
+                    cbar.set_label("10m wind magnitude (m/s)", fontsize=text_weight)
+
+                    fig.tight_layout()
+                    fig.savefig(
+                        f"{results_dir}case_study_plots/{name}_{t_base}_{target_leadtime[position]}_hour_sample.png",
+                    )
+            #
             print("Starting prediction loop...")
             for model in models_to_load:
                 plotting_dict[name][model["tag"]] = {}
@@ -395,7 +560,7 @@ for storm, data in plotting_dict.items():
     # find the keys that aren't IBTrACS
     model_keys = [key for key in data.keys() if key != "IBTrACS"]
 
-    leadtime_set = [18, 72, 120]
+    leadtime_set = [18, 24, 72, 96, 120]
 
     for leadtime in leadtime_set:
 

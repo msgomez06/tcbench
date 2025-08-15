@@ -41,7 +41,7 @@ def transform_data(data, scaler):
 # %%
 if __name__ == "__main__":
     # emulate system arguments
-    emulate = True
+    emulate = False
     # Simulate command line arguments
     if emulate:
         sys.argv = [
