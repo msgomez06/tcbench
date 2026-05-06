@@ -41,14 +41,14 @@ def transform_data(data, scaler):
 # %%
 if __name__ == "__main__":
     # emulate system arguments
-    emulate = False
+    emulate = True
     # Simulate command line arguments
     if emulate:
         sys.argv = [
             "script_name",  # Traditionally the script name, but it's arbitrary in Jupyter
-            "--ai_model",
+            # "--ai_model",
             # "panguweather",
-            "fourcastnetv2",
+            # "fourcastnetv2",
             # "--overwrite_cache",
             # "--min_leadtime",
             # "6",
@@ -56,15 +56,17 @@ if __name__ == "__main__":
             # "24",
             # "--use_gpu",
             # "--verbose",
-            "--reanalysis",
+            # "--reanalysis",
             "--mode",
             "probabilistic",
             "--cache_dir",
             "/scratch/mgomezd1/cache",
             # "/srv/scratch/mgomezd1/cache",
-            "--mask",
+            # "--mask",
             "--magAngle_mode",
             "--dask_array",
+            "--mask_ptile",
+            "84",
         ]
     # %%
     # check if the context has been set for torch multiprocessing
@@ -212,6 +214,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use dask arrays for the dataset",
     )
+    
+    parser.add_argument(
+        "--mask_ptile",
+        type=int,
+        default=84,
+    )
 
     args = parser.parse_args()
 
@@ -227,6 +235,12 @@ if __name__ == "__main__":
         args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
     )
     result_dir = args.result_dir
+    if args.mask_ptile != 84:
+        cache_dir = cache_dir+ f"_{args.mask_ptile}ptile"
+        result_dir = result_dir + f"_{args.mask_ptile}ptile"
+
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
 
     # Check for GPU availability
     if torch.cuda.is_available() and not args.ignore_gpu:
@@ -373,6 +387,12 @@ if __name__ == "__main__":
         ]
     ).T
     # %%
+    # nan filtering the training set
+    nan_idxs = np.isnan(train_x).any(axis=1)
+    train_x = train_x[~nan_idxs]
+    train_target = train_target[~nan_idxs]
+
+    
     # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
     nan_idxs = np.isnan(valid_x).any(axis=1)
     valid_x = valid_x[~nan_idxs]

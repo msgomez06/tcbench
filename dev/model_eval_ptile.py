@@ -43,6 +43,7 @@ def transform_data(data, scaler):
     return scaler.transform(data)
 
 
+
 # %%
 if __name__ == "__main__":
     # emulate system arguments
@@ -70,8 +71,10 @@ if __name__ == "__main__":
             "--magAngle_mode",
             "--dask_array",
             "--tag",
+            # "ptile-unmasked"
+            "ptile_unet"
             # "pangu_validation-reval",
-            "pangu_test-reval_revision",
+            # "pangu_test-reval_revision",
             # "fcast_test-reval",
             # "fcast_valid-reval",
             # "Pangu_validation-reval",
@@ -82,6 +85,8 @@ if __name__ == "__main__":
             "--report-global",
             "--batch_size",
             "32",
+            "--mask_ptile",
+            "84",
         ]
     # %%
     # check if the context has been set for torch multiprocessing
@@ -257,6 +262,12 @@ if __name__ == "__main__":
         default=32,
         help="Batch size for deep evaluation",
     )
+    parser.add_argument(
+        "--mask_ptile",
+        type=int,
+        default=84,
+    )
+
 
     args = parser.parse_args()
 
@@ -272,6 +283,23 @@ if __name__ == "__main__":
         args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
     )
     result_dir = args.result_dir
+    if args.mask_ptile != 84:
+        cache_dir = cache_dir+ f"_{args.mask_ptile}ptile"
+        result_dir = result_dir + f"_{args.mask_ptile}ptile"
+
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
+
+    target_scaler = None
+    fpath = os.path.join(cache_dir, "target_scaler.pkl")
+
+    if os.path.exists(fpath):
+        print("Loading target scaler from cache...", flush=True)
+        with open(fpath, "rb") as f:
+            target_scaler = pickle.load(f)
+    else:
+        raise FileNotFoundError(f"Target scaler not found at {fpath}")
+
 
     source_set = "test" if args.test_set else "validation"
 
@@ -357,10 +385,11 @@ if __name__ == "__main__":
         train_leadtimes = train_zarr["leadtime"]
 
     # %%
-    # Defining the models to load and the hyperparameters needed to evaluate them
-    results_dir = (
-        "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/"
-    )
+    # # Defining the models to load and the hyperparameters needed to evaluate them
+    # results_dir = (
+    #     "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/"
+    # )
+    results_dir = result_dir
 
     result_file = f"{results_dir}model_comparison_eval_{args.tag}.pkl"
 
@@ -437,454 +466,102 @@ if __name__ == "__main__":
                 valid_base_intensity.T,  # Base intensity
             ]
         ).T
-
-        nan_idxs = np.isnan(valid_x).any(axis=1)
-        valid_data = valid_data[~nan_idxs]
-        unmasked_valid_data
-        deep_scalars = deep_scalars[~nan_idxs]
-        valid_x = valid_x[~nan_idxs]
+        print("Data prepared.", flush=True)
+        # nan_idxs = np.isnan(valid_x).any(axis=1)
+        # valid_data = valid_data[~nan_idxs]
+        # unmasked_valid_data
+        # deep_scalars = deep_scalars[~nan_idxs]
+        # valid_x = valid_x[~nan_idxs]
         unmasked_valid_target = valid_target.copy()
-        valid_target = valid_target[~nan_idxs]
-        validation_unscaled_leadtimes = validation_unscaled_leadtimes[~nan_idxs]
+        # valid_target = valid_target[~nan_idxs]
+        # validation_unscaled_leadtimes = validation_unscaled_leadtimes[~nan_idxs]
 
-        unmasked_nan_idxs = np.isnan(unmasked_valid_x).any(axis=1)
-        unmasked_valid_data = unmasked_valid_data[~unmasked_nan_idxs]
-        unmasked_valid_x = unmasked_valid_x[~unmasked_nan_idxs]
-        unmasked_valid_target = unmasked_valid_target[~unmasked_nan_idxs]
+        # unmasked_nan_idxs = np.isnan(unmasked_valid_x).any(axis=1)
+        # unmasked_valid_data = unmasked_valid_data[~unmasked_nan_idxs]
+        # unmasked_valid_x = unmasked_valid_x[~unmasked_nan_idxs]
+        # unmasked_valid_target = unmasked_valid_target[~unmasked_nan_idxs]
 
         # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
         if args.ai_model == "panguweather" and not args.reanalysis:
-            models = [
-                # --------------- Panguweather Linear Models ---------------
-                # {
-                #     "filepath": "best_model_TorchMLR_12-12-15h15_epoch-40_panguweather_deterministic MagUnmasked.pt",
-                #     "masked": True,
-                #     "probabilistic": False,
-                #     "tag": "Masked MLR (Deterministic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                {
-                    "filepath": "TorchMLR_03-26-10h27_epoch-20_panguweather_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "Masked MLR (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                # {
-                #     "filepath": "TorchMLR_04-02-15h06_epoch-30_panguweather_probabilistic_unmasked.pt",
-                #     "masked": False,
-                #     "probabilistic": True,
-                #     "tag": "Unmasked MLR (Probabilistic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                # {
-                #     "filepath": "TorchMLR_04-02-14h25_epoch-20_panguweather_deterministic_unmasked.pt",
-                #     "masked": False,
-                #     "probabilistic": False,
-                #     "tag": "Unmasked MLR (Deterministic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                # {
-                #     "filepath": "SimpleANN_04-02-14h22_epoch-8_panguweather_deterministic_unmasked.pt",
-                #     "masked": False,
-                #     "probabilistic": False,
-                #     "tag": "Unmasked ANN (Deterministic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                # {
-                #     "filepath": "SimpleANN_01-31-11h47_epoch-14_panguweather_probabilistic_unmasked.pt",
-                #     "masked": False,
-                #     "probabilistic": True,
-                #     "tag": "Unmasked ANN (Probabilistic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                {
-                    "filepath": "SimpleANN_02-03-08h29_epoch-14_panguweather_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "Masked ANN (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                # {
-                #     "filepath": "SimpleANN_04-02-14h16_epoch-20_panguweather_deterministic_masked.pt",
-                #     "masked": True,
-                #     "probabilistic": False,
-                #     "tag": "Masked ANN (Deterministic)",
-                #     "results": [],
-                #     "deep": False,
-                # },
-                # -------- Pangu Deep-----
-                ##             {
-                ##     "filepath": "Regularized_CNN_04-02-10h47_epoch-19_panguweather-deterministic.pt",
-                ##     "masked": True,
-                ##     "probabilistic": False,
-                ##     "tag": "Masked Regularized CNN (Deterministic)",
-                ##     "results": [],
-                ##     "deep": True,
-                ## },
-                ## {
-                ##     "filepath": "Regularized_CNN_04-02-13h23_epoch-13_panguweather-probabilistic.pt",
-                ##     "masked": True,
-                ##     "probabilistic": True,
-                ##     "tag": "Masked Regularized CNN (Probabilistic)",
-                ##     "results": [],
-                ##     "deep": True,
-                ## },
-                ## {
-                ##     "filepath": "Regularized_CNN_04-02-11h56_epoch-14_panguweather-deterministic.pt",
-                ##     "masked": False,
-                ##     "probabilistic": False,
-                ##     "tag": "Unmasked Regularized CNN (Deterministic)",
-                ##     "results": [],
-                ##     "deep": True,
-                ## },
-                ## {
-                ##     "filepath": "Regularized_CNN_04-02-14h23_epoch-4_panguweather-probabilistic.pt",
-                ##     "masked": False,
-                ##     "probabilistic": True,
-                ##     "tag": "Unmasked Regularized CNN (Probabilistic)",
-                ##     "results": [],
-                ##     "deep": True,
-                ## },
-                # {
-                #     "filepath": "Regularized_CNN_06-25-12h56_epoch-40_panguweather-deterministic.pt",
-                #     "masked": True,
-                #     "probabilistic": False,
-                #     "tag": "Masked Regularized CNN (Deterministic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                # {
-                #     "filepath": "Regularized_CNN_06-25-17h13_epoch-17_panguweather-probabilistic.pt",
-                #     "masked": True,
-                #     "probabilistic": True,
-                #     "tag": "Masked Regularized CNN (Probabilistic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                # {
-                #     "filepath": "Regularized_CNN_06-25-15h08_epoch-40_panguweather-deterministic.pt",
-                #     "masked": False,
-                #     "probabilistic": False,
-                #     "tag": "Unmasked Regularized CNN (Deterministic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                # {
-                #     "filepath": "Regularized_CNN_06-25-18h08_epoch-1_panguweather-probabilistic.pt",
-                #     "masked": False,
-                #     "probabilistic": True,
-                #     "tag": "Unmasked Regularized CNN (Probabilistic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                # {
-                #     "filepath": "UNet_v2_06-18-16h30_epoch-16_panguweather-deterministic.pt",
-                #     "masked": True,
-                #     "probabilistic": False,
-                #     "tag": "Masked UNet (Deterministic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                {
-                    "filepath": "UNet_v2_06-18-20h11_epoch-6_panguweather-probabilistic.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "Masked UNet (Probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                # {
-                #     "filepath": "UNet_v2_06-18-18h33_epoch-6_panguweather-deterministic.pt",
-                #     "masked": False,
-                #     "probabilistic": False,
-                #     "tag": "Unmasked UNet (Deterministic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-                # {
-                #     "filepath": "UNet_v2_06-18-21h50_epoch-4_panguweather-probabilistic.pt",
-                #     "masked": False,
-                #     "probabilistic": True,
-                #     "tag": "Unmasked UNet (Probabilistic)",
-                #     "results": [],
-                #     "deep": True,
-                # },
-            ]
-        elif args.ai_model == "fourcastnetv2" and not args.reanalysis:
-            models = [
-                # --------------- FourcastNet Linear Models ---------------
-                {
-                    "filepath": "TorchMLR_04-02-14h36_epoch-30_fourcastnetv2_deterministic_masked.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked MLR (deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_01-31-12h20_epoch-20_fourcastnetv2_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked MLR (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_04-02-14h54_epoch-30_fourcastnetv2_deterministic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked MLR (Deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_01-31-12h05_epoch-20_fourcastnetv2_probabilistic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked MLR (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-02-14h43_epoch-6_fourcastnetv2_deterministic_masked.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked ANN (Deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_02-03-08h36_epoch-13_fourcastnetv2_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked ANN (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-02-14h46_epoch-20_fourcastnetv2_deterministic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked ANN (Deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_01-31-11h42_epoch-13_fourcastnetv2_probabilistic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked ANN (Probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                # --------------- FourcastNet Deep Models ---------------
-                {
-                    "filepath": "Regularized_CNN_06-25-19h04_epoch-39_fourcastnetv2-deterministic.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked CNN (deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_06-25-23h12_epoch-16_fourcastnetv2-probabilistic.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked CNN (Probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_06-25-21h09_epoch-33_fourcastnetv2-deterministic.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked CNN (Deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_06-26-00h08_epoch-9_fourcastnetv2-probabilistic.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked CNN (Probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_06-25-09h49_epoch-25_fourcastnetv2-deterministic.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked UNet (Deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_06-24-16h26_epoch-9_fourcastnetv2-probabilistic.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked UNet (Probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_06-25-12h00_epoch-5_fourcastnetv2-deterministic.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked UNet (Deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_06-24-17h54_epoch-3_fourcastnetv2-probabilistic.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked UNet (Probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-            ]
-        elif args.reanalysis:
-            models = [
-                # --------------- ERA5 Linear Models ---------------
-                {
-                    "filepath": "TorchMLR_04-10-14h11_epoch-29_ERA5_deterministic_masked.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked MLR (deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_04-10-14h58_epoch-30_ERA5_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked MLR (probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_04-10-14h01_epoch-30_ERA5_deterministic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked MLR (deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "TorchMLR_04-10-14h38_epoch-30_ERA5_probabilistic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked MLR (probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-10-14h19_epoch-7_ERA5_deterministic_masked.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked ANN (deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-10-14h24_epoch-13_ERA5_probabilistic_masked.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked ANN (probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-10-13h59_epoch-5_ERA5_deterministic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked ANN (deterministic)",
-                    "results": [],
-                    "deep": False,
-                },
-                {
-                    "filepath": "SimpleANN_04-10-14h46_epoch-19_ERA5_probabilistic_unmasked.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked ANN (probabilistic)",
-                    "results": [],
-                    "deep": False,
-                },
-                # --------------- ERA5 Deep Models ---------------
-                {
-                    "filepath": "Regularized_CNN_07-23-15h40_epoch-29_ERA5-deterministic.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked CNN (deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_07-24-12h09_epoch-11_ERA5-probabilistic.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked CNN (probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_07-24-10h57_epoch-12_ERA5-deterministic.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked CNN (deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "Regularized_CNN_07-24-13h36_epoch-14_ERA5-probabilistic.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked CNN (probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_07-24-15h13_epoch-7_ERA5-deterministic.pt",
-                    "masked": True,
-                    "probabilistic": False,
-                    "tag": "masked UNet (deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_07-24-16h26_epoch-4_ERA5-probabilistic.pt",
-                    "masked": True,
-                    "probabilistic": True,
-                    "tag": "masked UNet (probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_07-24-15h48_epoch-4_ERA5-deterministic.pt",
-                    "masked": False,
-                    "probabilistic": False,
-                    "tag": "unmasked UNet (deterministic)",
-                    "results": [],
-                    "deep": True,
-                },
-                {
-                    "filepath": "UNet_v2_07-24-17h01_epoch-3_ERA5-probabilistic.pt",
-                    "masked": False,
-                    "probabilistic": True,
-                    "tag": "unmasked UNet (probabilistic)",
-                    "results": [],
-                    "deep": True,
-                },
-            ]
+            if args.mask_ptile == 84:
+                models = [
+                    # --------------- Panguweather Linear Models ---------------
+                        # {
+                        #     "filepath": "SimpleANN_12-10-10h11_epoch-27_panguweather_probabilistic_masked.pt",
+                        #     "masked": True,
+                        #     "probabilistic": True,
+                        #     "tag": "ANN 84 ptile",
+                        #     "results": [],
+                        #     "deep": False,
+                        # },
+                        # {
+                        #     "filepath": "SimpleANN_12-13-20h08_epoch-17_panguweather_probabilistic_unmasked.pt",
+                        #     "masked": False,
+                        #     "probabilistic": True,
+                        #     "tag": "ANN Unmasked",
+                        #     "results": [],
+                        #     "deep": False,
+                        # },
+                        #------------------------------
+                        {
+                            "filepath": "UNet_v2_06-18-20h11_epoch-6_panguweather-probabilistic.pt",
+                            "masked": True,
+                            "probabilistic": True,
+                            "tag": "Masked UNet (Probabilistic)",
+                            "results": [],
+                            "deep": True,
+                        },
+                    ]
+            elif args.mask_ptile == 50:
+                models = [
+                        {
+                            "filepath": "SimpleANN_12-10-09h58_epoch-17_panguweather_probabilistic_masked.pt",
+                            "masked": True,
+                            "probabilistic": True,
+                            "tag": "ANN 50 ptile",
+                            "results": [],
+                            "deep": False,
+                        },
 
+                    ]
+            elif args.mask_ptile == 75:
+                models = [
+                        {
+                            "filepath": "SimpleANN_12-10-09h50_epoch-27_panguweather_probabilistic_masked.pt",
+                            "masked": True,
+                            "probabilistic": True,
+                            "tag": "ANN 75 ptile",
+                            "results": [],
+                            "deep": False,
+                        },
+
+                    ]
+            elif args.mask_ptile == 95:
+                models = [
+                        {
+                            "filepath": "SimpleANN_12-10-09h42_epoch-20_panguweather_probabilistic_masked.pt",
+                            "masked": True,
+                            "probabilistic": True,
+                            "tag": "ANN 95 ptile",
+                            "results": [],
+                            "deep": False,
+                        },
+
+                    ]
+            elif args.mask_ptile == 99:
+                models = [
+                        {
+                            "filepath": "SimpleANN_12-10-11h02_epoch-18_panguweather_probabilistic_masked.pt",
+                            "masked": True,
+                            "probabilistic": True,
+                            "tag": "ANN 99 ptile",
+                            "results": [],
+                            "deep": False,
+                        },
+
+                    ]
+        else:
+            raise NotImplementedError("Only Panguweather models are implemented.")
         # Load each pytorch model into the models dictionary
         for model in models:
             model["model"] = torch.load(
@@ -907,6 +584,8 @@ if __name__ == "__main__":
         # Evaluate the models
         climatology_results = {"deterministic": [], "probabilistic": []}
         persistence_results = {"deterministic": [], "probabilistic": []}
+
+        print("Baselines calculated...", flush=True)
 
         if args.report_global:
             if args.dask_array:
@@ -1023,6 +702,22 @@ if __name__ == "__main__":
                     model['raw predictions'] = prediction
                     model['raw targets'] = unmasked_valid_target
                     model['raw leadtimes'] = validation_unscaled_leadtimes
+
+                    # save predictions, targets, leadtimes as dataframe
+                    df = pd.DataFrame()
+                    transformed_means = target_scaler.inverse_transform(prediction[:,[0,2]])
+                    transformed_sigmas = target_scaler.inverse_transform(prediction[:,[1,3]])
+                    transformed_target = target_scaler.inverse_transform(
+                        unmasked_valid_target
+                    )
+                    df['Predictions_vmax_mu'] = transformed_means[:,0]
+                    df['Predictions_mslp_mu'] = transformed_means[:,1]
+                    df['Predictions_vmax_sigma'] = transformed_sigmas[:,0]
+                    df['Predictions_mslp_sigma'] = transformed_sigmas[:,1]
+                    df['Targets_vmax'] = transformed_target[:,0]
+                    df['Targets_mslp'] = transformed_target[:,1]
+                    df['Leadtimes'] = validation_unscaled_leadtimes.flatten()
+                    df.to_csv(f"{results_dir}model_comparison_raw_predictions_{args.tag}.csv", index=False)
 
         for unique_leadtime in unique_leadtimes:
             bool_idxs = (validation_unscaled_leadtimes == unique_leadtime).squeeze()
@@ -1321,6 +1016,7 @@ if args.report_global:
 
     global_df = global_df.sort_index()
     global_df.to_csv(filename, index=False)
+
 
     # do the same for climatology and persistence results
 

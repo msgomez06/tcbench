@@ -16,12 +16,12 @@ from utils import data_lib as dlib
 import argparse
 
 # %% Load the seasons to process
-emulate = False
+emulate = True
 if emulate:
     sys.argv = [
         "reanal_track_processor.py",
         "--season",
-        "2004",
+        "2017",
     ]
 
 
@@ -37,14 +37,26 @@ parser.add_argument(
 args = parser.parse_args()
 
 # %%
+target_dir = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/ilia/"
 seasons = toolbox.get_TC_seasons(
     season_list=[args.season],
-    datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/ilia/",
+    datadir_path=target_dir,
 )
 # seasons = toolbox.get_TC_seasons(
-#     season_list=[*range(2019, 2020)],
+#     season_list=[2023],  # *range(2019, 2020)],
 #     datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
 # )
+
+# %%
+# get the list of files in the target directory for each season
+calculated_storms = []
+season_dir = os.path.join(target_dir, str(args.season))
+if os.path.exists(season_dir):
+    files = os.listdir(season_dir)
+    for file in files:
+        if file.endswith(".nc"):
+            storm_id = file.split(".")[0]
+            calculated_storms.append(storm_id)
 
 # %% Control flags
 process = True
@@ -65,10 +77,35 @@ for season, storms in seasons.items():
 
         # determine the number of processors that can be used
         # n_jobs = jl.cpu_count()
-        n_jobs = 4
+        n_jobs = 2
 
-        # for storm in storms:
-        #     storm.process_data_collection(
+        for storm in storms:
+            if storm.uid in calculated_storms:
+                print(f"Skipping {str(storm)} as it has already been processed.")
+                continue
+            try:
+                storm.process_data_collection(
+                    dc,
+                    reanal_variables=[
+                        "10m_u_component_of_wind",
+                        "10m_v_component_of_wind",
+                        "mean_sea_level_pressure",
+                        # "temperature",
+                        # "geopotential",
+                    ],
+                    masktype="rect",
+                    circum_points=5 * 4,
+                    # plevels={"temperature": [850], "geopotential": [500]},
+                    verbose=True,
+                    n_jobs=4,
+                )
+            except Exception as e:
+                print(f"Failed to process {str(storm)}")
+                print(f"Error: {e}")
+
+        # # process the tracks
+        # jl.Parallel(n_jobs=n_jobs, backend="threading")(
+        #     jl.delayed(storm.process_data_collection)(
         #         dc,
         #         reanal_variables=[
         #             "10m_u_component_of_wind",
@@ -77,32 +114,14 @@ for season, storms in seasons.items():
         #             "temperature",
         #             "geopotential",
         #         ],
+        #         plevels={"temperature": [850], "geopotential": [500]},
         #         masktype="rect",
         #         circum_points=30 * 4,
-        #         plevels={"temperature": [850], "geopotential": [500]},
-        #         verbose=True,
-        #         n_jobs=4,
+        #         n_jobs=n_jobs,
+        #         verbose=False,
         #     )
-
-        # process the tracks
-        jl.Parallel(n_jobs=n_jobs, backend="threading")(
-            jl.delayed(storm.process_data_collection)(
-                dc,
-                reanal_variables=[
-                    "10m_u_component_of_wind",
-                    "10m_v_component_of_wind",
-                    "mean_sea_level_pressure",
-                    # "temperature",
-                    # "geopotential",
-                ],
-                # plevels={"temperature": [850], "geopotential": [500]},
-                masktype="rect",
-                circum_points=5 * 4,
-                n_jobs=n_jobs,
-                verbose=False,
-            )
-            for storm in storms
-        )
+        #     for storm in storms[6:]
+        # )
 
     else:
         # for storm in storms:

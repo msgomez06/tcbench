@@ -163,7 +163,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Imports successful", flush=True)
-
+#%%
     #  Setup
     datadir = args.datadir
     cache_dir = args.cache_dir + f"_{args.ai_model}"
@@ -285,6 +285,12 @@ if __name__ == "__main__":
 
     lat_speed = mean_delta_lat / np.array(leadtimes)
     mean_lat_speed = np.mean(lat_speed)
+
+    # save the delta lons in a dictionary
+    delta_lon_dict = {leadtimes[i]: delta_lons[i] for i in range(len(leadtimes))}
+
+    with open(os.path.join(args.result_dir, "delta_lon_dict.pkl"), "wb") as f:
+        pickle.dump(delta_lon_dict, f)
 
 # %% Pair printing for tex
 for var in [displacement_percentiles, delta_lon_percentiles, delta_lat_percentiles]:
@@ -419,48 +425,56 @@ for var in [displacement_percentiles, delta_lon_percentiles, delta_lat_percentil
         label="Displacement at Mean Speed",
     )
 
-    # %% Logarithmic fitting for 99th percentile
-
+    # %% Logarithmic fitting for nth percentile
     from scipy.optimize import curve_fit
 
-    def log_func(x, a, b, c, d):
-        return a * np.log(b * x + c) + d
+    for tgt_idx in [-5, -4, -3, -2, -1]:
+        def log_func(x, a, b, c, d):
+            return a * np.log(b * x + c) + d
 
-    tgt_idx = -3
+        # tgt_idx = -3
 
-    # Fit the leadtimes and displacement percentiles to the logarithmic function
-    popt, pcov = curve_fit(log_func, leadtimes, displacement_percentiles[:, tgt_idx])
+        # Fit the leadtimes and displacement percentiles to the logarithmic function
+        popt, pcov = curve_fit(log_func, leadtimes, displacement_percentiles[:, tgt_idx])
 
-    np.save(
-        "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/log_params_84ptile.npy",
-        popt,
-    )
+        np.save(
+            os.path.join(args.result_dir, f"log_params_{q[tgt_idx]}ptile.npy"),
+            popt,
+        )
 
-    # Plot the fitted curve
-    fig, ax = plt.subplots()
-    ax.scatter(
-        leadtimes,
-        displacement_percentiles[:, tgt_idx].squeeze(),
-        c=colors[3],
-        label="Data",
-        # s=5,
-        marker="+",
-    )
-    plot_x = np.linspace(0, leadtimes.max() + 1, 100)
-    ax.plot(
-        plot_x,
-        log_func(plot_x, *popt),
-        c=colors[2],
-        label=rf"$F(t_{{ld}}) = {popt[0]:.2f} \cdot \log({popt[1]:.2f} \cdot t_{{ld}} + {popt[2]:.2f}){popt[3]:.2f}$",
-    )
-    ax.set_xlabel("Leadtime (hours)")
-    ax.set_ylabel("Displacement (km)")
-    ax.legend()
-    fig.suptitle(
-        f"{q[tgt_idx]}th Percentile Displacement vs. Leadtime",
-        color=np.array([242, 240, 228]) / 255,
-    )
-    toolbox.plot_facecolors(fig=fig, axes=ax)
+        # Plot the fitted curve
+        fig, ax = plt.subplots()
+        ax.scatter(
+            leadtimes,
+            displacement_percentiles[:, tgt_idx].squeeze(),
+            c=colors[3],
+            label="Data",
+            # s=5,
+            marker="+",
+        )
+        plot_x = np.linspace(0, leadtimes.max() + 1, 100)
+        ax.plot(
+            plot_x,
+            log_func(plot_x, *popt),
+            c=colors[2],
+            label=rf"$F(t_{{ld}}) = {popt[0]:.2f} \cdot \log({popt[1]:.2f} \cdot t_{{ld}} + {popt[2]:.2f}){popt[3]:.2f}$",
+        )
+        ax.set_xlabel("Leadtime (hours)")
+        ax.set_ylabel("Displacement (km)")
+        # set the y limits
+        ax.set_ylim(0, 3000)
+        ax.set_xlim(0,168)
+        ax.legend()
+        fig.suptitle(
+            f"{q[tgt_idx]}th Percentile Displacement vs. Leadtime",
+            color=np.array([242, 240, 228]) / 255,
+        )
+        toolbox.plot_facecolors(fig=fig, axes=ax)
+        # plt.show()
+        # save the figure
+        fig.savefig(os.path.join(args.result_dir, f"log_fit_{q[tgt_idx]}ptile.png"))
+        plt.close(fig)
+
 
     # %%
 
@@ -549,5 +563,7 @@ ax.grid(True)
 
 toolbox.plot_facecolors(fig=fig, axes=ax)
 plt.tight_layout()
-plt.show()
+# plt.show()
+# save the figure
+fig.savefig(os.path.join(args.result_dir, f"decay_strategies.png"))
 # %%

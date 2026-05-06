@@ -15,6 +15,7 @@ import dask
 import multiprocessing
 import json
 import zarr as zr
+import pandas as pd
 
 # from dask import optimize
 import time
@@ -241,7 +242,7 @@ if __name__ == "__main__":
 
     #  Setup
     datadir = args.datadir
-    cache_dir = args.cache_dir + f"_{args.ai_model}"
+    cache_dir = os.path.join(args.cache_dir, f"_{args.ai_model}")
     result_dir = args.result_dir
 
     # Check for GPU availability
@@ -427,6 +428,39 @@ if __name__ == "__main__":
             "rb",
         ) as f:
             histograms = pickle.load(f)
+    # %%
+    # Iterate through the histograms and create a csv for each feature
+    for feature_name, hist_data in histograms.items():
+
+        # Calculate the bin centers
+        train_bin_centers = 0.5 * (
+            hist_data["train_bin_edges"][1:] + hist_data["train_bin_edges"][:-1]
+        )
+        valid_bin_centers = 0.5 * (
+            hist_data["valid_bin_edges"][1:] + hist_data["valid_bin_edges"][:-1]
+        )
+
+        # Make counts density
+        train_density = hist_data["train_hist"] / np.sum(hist_data["train_hist"])
+        valid_density = hist_data["valid_hist"] / np.sum(hist_data["valid_hist"])
+
+        # Create a DataFrame for the current feature
+        feature_df = pd.DataFrame(
+            {
+                "Train_Bin_Centers": train_bin_centers,
+                "Train_Density": train_density,
+                "Valid_Bin_Centers": valid_bin_centers,
+                "Valid_Density": valid_density,
+            }
+        )
+
+        # Save the DataFrame to a CSV file
+        csv_filename = os.path.join(
+            result_dir,
+            f"{feature_name}_histogram_{'mask' if args.mask else 'unmasked'}.csv",
+        )
+        feature_df.to_csv(csv_filename, index=False)
+
     # %%
     # Print the loaded histogram data
     for feature_name, hist_data in histograms.items():

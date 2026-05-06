@@ -52,11 +52,13 @@ if __name__ == "__main__":
             # "24",
             # "--use_gpu",
             # "--verbose",
-            "--reanalysis",
+            # "--reanalysis",
             "--cache_dir",
             "/scratch/mgomezd1/cache",
             "--mask",
             "--magAngle_mode",
+            "--mask_ptile",
+            "50",
         ]
     # %%
     # check if the context has been set for torch multiprocessing
@@ -205,6 +207,12 @@ if __name__ == "__main__":
         help="Whether to use an auxiliary loss",
     )
 
+    parser.add_argument(
+        "--mask_ptile",
+        type=int,
+        default=84,
+    )
+
     args = parser.parse_args()
 
     print("Imports successful", flush=True)
@@ -218,6 +226,9 @@ if __name__ == "__main__":
     cache_dir = os.path.join(
         args.cache_dir, f"_{args.ai_model}" if not args.reanalysis else "ERA5"
     )
+    if args.mask_ptile != 84:
+        cache_dir = cache_dir+ f"_{args.mask_ptile}ptile"
+
     result_dir = args.result_dir
 
     num_cores = int(subprocess.check_output(["nproc"], text=True).strip())
@@ -608,6 +619,9 @@ if __name__ == "__main__":
 
     if args.mask and ((not found) or args.overwrite_cache):
         mask_path = args.mask_path
+        if args.mask_ptile != 84:
+            #replace .pkl with _ptile.pkl
+            mask_path = mask_path.replace(".pkl", f"_{args.mask_ptile}ptile.pkl")
         with open(mask_path, "rb") as f:
             mask_dict = pickle.load(f)[args.mask_type]
 

@@ -7,131 +7,278 @@ import matplotlib as mpl
 import pandas as pd
 import numpy as np
 
+import argparse
 
 from utils import toolbox, constants
 from utils.toolbox import *
 from utils import data_lib as dlib
 import metrics
 
-# %%
 
-ibtracs = full_data = toolbox.read_hist_track_file(
-    tracks_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-)
+def evaluate_tracks_RI(
+    ibtracs_folder: str,
+    results_folder: str,
+    year: int = 2023,
+    RI_thresh: float = 34.0,
+    RI_window: int = 24,
+    keep_intensification: bool = False,
+    select_files: list[str] | None = None,
+    recompute: bool = False,
+    verbose: bool = True,
+):
+    """Compute RI labels for track CSVs and save `<name>_RI.csv` (works for any model type)."""
+    # Read IBTrACS and filter by year
+    ibtracs = toolbox.read_hist_track_file(tracks_path=ibtracs_folder)
+    ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == year]
 
-ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023]
+    # Precompute IBTrACS intensification and RI flag at 6h grid
+    ibtracs = ibtracs[np.isin(ibtracs["ISO_TIME"].dt.hour, [0, 6, 12, 18])].copy()
+    ibtracs["USA_WIND"] = (
+        ibtracs["USA_WIND"].astype(str).str.strip().replace("", np.nan).astype(float)
+    )
+    ibtracs["RI"] = pd.Series(
+        pd.array([pd.NA] * len(ibtracs), dtype="boolean"), index=ibtracs.index
+    )
+    ibtracs["intensification"] = pd.Series(
+        np.full(len(ibtracs), np.nan), index=ibtracs.index, dtype="float"
+    )
 
-# %%
-eval_folder = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
-track_files = os.listdir(eval_folder)
-track_files = [f for f in track_files if f.endswith(".csv")]
-
-# %%
-for track_file in track_files:
-    print(f"Working on {track_file}...")
-
-    # skip if results in name
-    if "results" in track_file:
-        print("Skipping...")
-        continue
-
-    # Read the track file
-    track_df = pd.read_csv(os.path.join(eval_folder, track_file))
-
-    # Check if the ensemble dimension is present
-    probabilistic = False
-    for col in track_df.columns:
-        if "ensemble" in col:
-            ensemble_col = col
-            probabilistic = True
-            break
-
-    if probabilistic:
-        # Select one ensemble member to copy
-        ensemble_idx = track_df.iloc[0][ensemble_col]
-        result_df = track_df.loc[track_df[ensemble_col] == ensemble_idx].copy()
-        # drop the ensemble column
-        result_df = result_df.drop(columns=[ensemble_col])
-    else:
-        # Select the first ensemble member
-        result_df = track_df.copy()
-
-    error_metrics = [metrics.DPE, metrics.AE, metrics.SE]
-    if probabilistic:
-        error_metrics += [metrics.FCRPS, metrics.HCRPS]
-
-    for metric in error_metrics:
-        print(f"Calculating {metric}...")
-
-        # Calculate the metric
-        result = metric(
-            reference=ibtracs,
-            predictions=track_df,
+    for SID in ibtracs["SID"].unique():
+        mask_sid = ibtracs["SID"] == SID
+        df_sid = ibtracs.loc[mask_sid].copy()
+        ref_sid = df_sid.copy()
+        orig_idx = ref_sid.index
+        df_sid["ref_time"] = pd.to_datetime(df_sid["ISO_TIME"]) - pd.Timedelta(
+            hours=RI_window
+        )
+        df_sid = df_sid.merge(
+            ref_sid.rename(
+                columns={"ISO_TIME": "ref_time", "USA_WIND": "ref_intensity"}
+            )[["ref_time", "ref_intensity"]],
+            on="ref_time",
+            how="left",
+        )
+        df_sid["intensification"] = df_sid["USA_WIND"] - df_sid["ref_intensity"]
+        df_sid["RI"] = df_sid["intensification"] >= RI_thresh
+        df_sid = df_sid.set_index(orig_idx)
+        ibtracs.loc[df_sid.index, "RI"] = df_sid["RI"].astype("boolean")
+        ibtracs.loc[df_sid.index, "intensification"] = pd.to_numeric(
+            df_sid["intensification"], errors="coerce"
         )
 
-        ensemble_labels = None
-        if probabilistic and len(result) == len(track_df):
-            # make a dataframe with a column for the ensemble member
-            # a column for each result label, a column for the init time and a column for the valid time
+    # Discover target files
+    if select_files is None:
+        all_files = [f for f in os.listdir(results_folder) if f.endswith(".csv")]
+        # consider any track-like csv that is not already an RI or results file
+        track_files = [
+            f
+            for f in all_files
+            if ("results" not in f.lower())
+            and (not f.lower().endswith("_ri.csv"))
+            and ("ibtracs" not in f.lower())
+        ]
+    else:
+        track_files = [f for f in select_files if f.endswith(".csv")]
 
-            ensemble_labels = pd.DataFrame(
-                index=track_df.index,
-                columns=[
-                    ensemble_col,
-                    *metric.return_labels,
-                    "Initial Time",
-                    "Valid Time",
-                    "SID",
-                ],
+    out_map: dict[str, str] = {}
+
+    for track_file in track_files:
+        base = os.path.splitext(track_file)[0]
+        out_csv = os.path.join(results_folder, f"{base}_RI.csv")
+        if (not recompute) and os.path.exists(out_csv):
+            if verbose:
+                print(f"Skipping {track_file} (exists): {os.path.basename(out_csv)}")
+            out_map[base] = out_csv
+            continue
+
+        track_df = pd.read_csv(os.path.join(results_folder, track_file))
+
+        # Detect ensemble column
+        probabilistic = False
+        ensemble_col = None
+        for col in track_df.columns:
+            if "ensemble" in str(col).lower():
+                ensemble_col = col
+                probabilistic = True
+                break
+
+        # Ensure datetime and indexability
+        track_df["Initial Time"] = pd.to_datetime(
+            track_df["Initial Time"], errors="coerce"
+        )
+        track_df["Valid Time"] = pd.to_datetime(track_df["Valid Time"], errors="coerce")
+
+        # Initialize RI columns if missing
+        if "RI" not in track_df.columns:
+            track_df["RI"] = pd.Series(
+                pd.array([pd.NA] * len(track_df), dtype="boolean"), index=track_df.index
             )
-            ensemble_labels.loc[:, ensemble_col] = track_df[ensemble_col]
-            ensemble_labels.loc[:, "Initial Time"] = track_df["Initial Time"]
-            ensemble_labels.loc[:, "Valid Time"] = track_df["Valid Time"]
-            ensemble_labels.loc[:, "SID"] = track_df["SID"]
-            if len(result.shape) == 1:
-                # If the result is a 1D array, add it to the track_df
-                ensemble_labels[metric.return_labels[0]] = result
-            else:
-                for idx, label in enumerate(metric.return_labels):
-                    ensemble_labels[label] = result[:, idx]
-
-            # group by init, valid time, & SID
-            ensemble_labels = ensemble_labels.groupby(
-                ["Initial Time", "Valid Time", "SID"]
-            )
-
-            mean_result = ensemble_labels.mean()
-            std_result = ensemble_labels.std()
-            # Where the standard deviation is 0, set it to NaN
-            std_result[std_result == 0] = np.nan
-
-            mean_result = mean_result.reset_index()
-            std_result = std_result.reset_index()
-
-            # add the mean and std to the result_df
-            for idx, label in enumerate(metric.return_labels):
-                result_df[label + "_mean"] = mean_result[label]
-                result_df[label + "_std"] = std_result[label]
-
-        # elif probabilistic and len(result) == len(result_df):
-        #     if len(result.shape) == 1:
-        #         # If the result is a 1D array, add it to the track_df
-        #         track_df[metric.return_labels[0]] = result
-        #     else:
-        #         for idx, label in enumerate(metric.return_labels):
-        #             track_df[label] = result[:, idx]
-
         else:
-            if len(result.shape) == 1:
-                # If the result is a 1D array, add it to the track_df
-                result_df[metric.return_labels[0]] = result
-            else:
-                for idx, label in enumerate(metric.return_labels):
-                    result_df[label] = result[:, idx]
+            try:
+                track_df["RI"] = track_df["RI"].astype("boolean")
+            except Exception:
+                track_df["RI"] = pd.Series(
+                    pd.array([pd.NA] * len(track_df), dtype="boolean"),
+                    index=track_df.index,
+                )
+        if keep_intensification and "intensification" not in track_df.columns:
+            track_df["intensification"] = np.nan
 
-    filename = track_file.split(".")[0]
+        for SID in track_df["SID"].dropna().unique():
+            mask_sid = track_df["SID"] == SID
+            df_sid = track_df.loc[mask_sid].copy()
+            ib_ref = ibtracs[ibtracs["SID"] == SID].copy()
 
-    # Save the track_df
-    result_df.to_csv(os.path.join(eval_folder, f"{filename}_results.csv"), index=False)
+            ref_sid = df_sid.copy()
+            orig_idx = df_sid.index
+            df_sid["ref_time"] = df_sid["Valid Time"] - pd.Timedelta(hours=RI_window)
 
-# %%
+            # Build a temporary key for (init, tau) match
+            ref_sid["temp_index"] = (
+                ref_sid["Initial Time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                + " tau "
+                + (
+                    (
+                        (
+                            ref_sid["Valid Time"] - ref_sid["Initial Time"]
+                        ).dt.total_seconds()
+                        // 3600
+                    )
+                    .astype(int)
+                    .astype(str)
+                )
+            )
+            df_sid["temp_index"] = (
+                df_sid["Initial Time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                + " tau "
+                + (
+                    (
+                        (df_sid["ref_time"] - df_sid["Initial Time"]).dt.total_seconds()
+                        // 3600
+                    )
+                    .astype(int)
+                    .astype(str)
+                )
+            )
+
+            if probabilistic and (ensemble_col in df_sid.columns):
+                ref_sid["temp_index"] = (
+                    ref_sid["temp_index"]
+                    + " ens_idx "
+                    + ref_sid[ensemble_col].astype(str)
+                )
+                df_sid["temp_index"] = (
+                    df_sid["temp_index"]
+                    + " ens_idx "
+                    + df_sid[ensemble_col].astype(str)
+                )
+
+            ref_sid["orig_idx"] = ref_sid.index
+
+            # Local self-merge to get wind at ref_time from same file when available
+            df_sid = df_sid.merge(
+                ref_sid[["temp_index", "wind max"]].rename(
+                    columns={"wind max": "wind max ref"}
+                ),
+                on="temp_index",
+                how="left",
+            )
+
+            # For those rows where ref_time == Initial Time, fall back to IBTrACS wind
+            fallback_mask = df_sid["Initial Time"] == df_sid["ref_time"]
+            if fallback_mask.any():
+                ib_finder = df_sid.loc[fallback_mask, ["Valid Time"]].merge(
+                    ib_ref.rename(columns={"ISO_TIME": "Valid Time"})[
+                        ["Valid Time", "USA_WIND"]
+                    ],
+                    on="Valid Time",
+                    how="left",
+                )
+                ref_values = (
+                    ib_finder["USA_WIND"]
+                    .astype(str)
+                    .str.strip()
+                    .replace("", np.nan)
+                    .astype(float)
+                )
+                df_sid.loc[fallback_mask, "wind max ref"] = ref_values.values
+
+            # Compute intensification and flag
+            df_sid["intensification"] = df_sid["wind max"] - df_sid["wind max ref"]
+            df_sid["RI"] = df_sid["intensification"] >= RI_thresh
+
+            # Map back to original indices
+            df_sid["temp_index"] = (
+                df_sid["Initial Time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                + " tau "
+                + (
+                    (
+                        (
+                            df_sid["Valid Time"] - df_sid["Initial Time"]
+                        ).dt.total_seconds()
+                        // 3600
+                    )
+                    .astype(int)
+                    .astype(str)
+                )
+            )
+            if probabilistic and (ensemble_col in df_sid.columns):
+                df_sid["temp_index"] = (
+                    df_sid["temp_index"]
+                    + " ens_idx "
+                    + df_sid[ensemble_col].astype(str)
+                )
+
+            ref_sid = ref_sid[["temp_index", "orig_idx"]]
+            df_sid = df_sid.merge(ref_sid, on="temp_index", how="left")
+            df_sid.dropna(subset=["orig_idx"], inplace=True)
+            df_sid = df_sid.set_index("orig_idx")
+            df_sid.index.name = None
+
+            track_df.loc[df_sid.index, "RI"] = df_sid["RI"].astype("boolean")
+            if keep_intensification:
+                track_df.loc[df_sid.index, "intensification"] = df_sid[
+                    "intensification"
+                ]
+
+        # Save
+        track_df.to_csv(out_csv, index=False)
+        out_map[base] = out_csv
+        if verbose:
+            print(f"Saved RI file: {out_csv}")
+
+    return out_map
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Compute RI labels for track CSVs and save <name>_RI.csv"
+    )
+    parser.add_argument(
+        "--ibtracs_folder",
+        type=str,
+        default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/",
+    )
+    parser.add_argument(
+        "--results_folder",
+        type=str,
+        default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results",
+    )
+    parser.add_argument("--year", type=int, default=2023)
+    parser.add_argument("--RI_thresh", type=float, default=34.0)
+    parser.add_argument("--RI_window", type=int, default=24)
+    parser.add_argument("--keep_intensification", action="store_true")
+    parser.add_argument("--recompute", action="store_true")
+    args = parser.parse_args()
+
+    evaluate_tracks_RI(
+        ibtracs_folder=args.ibtracs_folder,
+        results_folder=args.results_folder,
+        year=args.year,
+        RI_thresh=args.RI_thresh,
+        RI_window=args.RI_window,
+        keep_intensification=args.keep_intensification,
+        select_files=None,
+        recompute=args.recompute,
+        verbose=True,
+    )
