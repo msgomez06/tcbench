@@ -29,7 +29,6 @@ import joblib as jl
 from utils import toolbox, constants, ML_functions as mlf
 from utils import data_lib as dlib
 
-
 # %% Reference Dictionaries
 short_names = {
     "root_mean_squared_error": "RMSE",
@@ -76,57 +75,6 @@ class metric(object):
             The predicted values.
         """
         return self.function(reference, predictions, **kwargs)
-
-
-# # %% Utilities
-# def _check_regression(y_true, y_pred):
-#     """Check that the regression inputs are of the correct form."""
-#     raise NotImplementedError
-#     assert y_true.shape == y_pred.shape, "y_true and y_pred must have the same shape."
-#     # assert y_true.ndim == 1, "y_true and y_pred must be 1D arrays."
-#     # assert y_pred.ndim == 1, "y_true and y_pred must be 1D arrays."
-#     return y_true, y_pred
-
-
-# def _check_classification(y_true, y_pred):
-#     """Check that the classification inputs are of the correct form."""
-#     raise NotImplementedError
-#     assert y_true.shape == y_pred.shape, "y_true and y_pred must have the same shape."
-#     # assert y_true.ndim == 1, "y_true and y_pred must be 1D arrays."
-#     # assert y_pred.ndim == 1, "y_true and y_pred must be 1D arrays."
-#     return y_true, y_pred
-
-
-# # %% Metrics
-
-
-# # def CRPS(y_true, y_pred):
-# #     """Compute the Continuous Ranked Probability Score (CRPS).
-
-# #     The CRPS is a probabilistic metric that evaluates the accuracy of a
-# #     probabilistic forecast. It is defined as the integral of the squared
-# #     difference between the cumulative distribution function (CDF) of the
-# #     forecast and the CDF of the observations.
-
-# #     Parameters
-# #     ----------
-# #     y_true : array-like of shape (n_samples,)
-# #         The true target values.
-
-# #     y_pred : array-like of shape (n_samples, n_classes)
-# #         The predicted probabilities for each class.
-
-# #     Returns
-# #     -------
-# #     crps : float
-# #         The CRPS value.
-# #     """
-# #     # Check that the inputs are of the correct form
-# #     y_true, y_pred = _check_classification(y_true, y_pred)
-
-# #     # Compute the CRPS
-# #     raise NotImplementedError
-# #     return crps
 
 
 def CRPS_ML(y_pred, y_true, **kwargs):
@@ -198,164 +146,6 @@ def CRPS_np(mu, sigma, y, **kwargs):
     cdf = 0.5 * (1.0 + erf(loc / np.sqrt(2)))
     crps = sigma * (loc * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / np.sqrt(np.pi))
     return crps.mean() if reduction == "mean" else crps
-
-
-# def CRPSNumpy(mu_pred, sigma_pred, y_true, **kwargs):
-#     reduction = kwargs.get("reduction", "mean")
-#     indiv_losses = np.empty((y_true.shape))
-
-#     for i in range(0, y_true.shape[1]):
-#         l = CRPS_np(mu_pred[:, i], sigma_pred[:, i], y_true[:, i], reduction=reduction)
-#         indiv_losses[:, i] = l
-
-#     return indiv_losses
-
-
-# def summarize_performance(y_true, y_pred, y_baseline, metrics: list, **kwargs):
-#     """Summarize the performance of the model and the baseline.
-
-#     Parameters
-#     ----------
-#     y_true : array-like of shape (n_samples,)
-#         The true target values.
-
-#     y_pred : array-like of shape (n_samples,)
-#         The predicted target values.
-
-#     y_baseline : array-like of shape (n_samples,)
-#         The baseline target values.
-
-#     metrics : list of functions
-#         The list of metrics to compute.
-
-#     Returns
-#     -------
-#     performance : dict
-#         A dictionary containing the performance metrics.
-#     """
-#     # # Check that the inputs are of the correct form
-#     # y_true, y_pred = _check_regression(y_true, y_pred)
-#     # y_true, y_baseline = _check_regression(y_true, y_baseline)
-
-#     # Assert that the predictions have the shape (n_samples, n_features)
-#     assert y_pred.ndim == 2, "y_pred must have shape (n_samples, n_features)"
-
-#     y_labels = kwargs.get("y_labels", {0: "Wind", 1: "Pressure"})
-
-#     # Compute the performance metrics
-#     performance = {}
-#     for metric in metrics:
-#         for i in range(y_pred.shape[1]):
-#             y_true_i = y_true[:, i]
-#             y_pred_i = y_pred[:, i]
-#             y_baseline_i = y_baseline[:, i]
-
-#             if metric.__name__ in short_names.keys():
-#                 metric_name = short_names[metric.__name__]
-#             else:
-#                 metric_name = metric.__name__
-
-#             performance[f"{metric_name}_{y_labels[i]}"] = metric(y_true_i, y_pred_i)
-#             performance[f"{metric_name}_{y_labels[i]}_baseline"] = metric(
-#                 y_true_i, y_baseline_i
-#             )
-
-#             if kwargs.get("skill", True):
-#                 performance[f"{metric_name}_{y_labels[i]}_skill"] = (
-#                     1
-#                     - performance[f"{metric_name}_{y_labels[i]}"]
-#                     / performance[f"{metric_name}_{y_labels[i]}_baseline"]
-#                 )
-
-#     return performance
-
-
-# # %%
-# def plot_performance(metrics: dict, ax, **kwargs):
-#     """Plot the performance metrics.
-
-#     Parameters
-#     ----------
-#     metrics : dict
-#         A dictionary containing the performance metrics.
-
-#     ax : matplotlib.axes.Axes
-#         The axes to plot the metrics on.
-
-#     Returns
-#     -------
-#     None
-#     """
-#     if kwargs.get("skill", True):
-#         assert isinstance(
-#             ax, np.ndarray
-#         ), "ax should be a numpy array if skill=True (default)"
-
-#         ax1 = ax[0]
-#         ax2 = ax[1]
-#     else:
-#         ax1 = ax
-
-#     model_name = kwargs.get("model_name", "Model")
-#     baseline_name = kwargs.get("baseline_name", "Baseline")
-
-#     # Generate a list of unique metrics
-#     metric_names = []
-#     for metric in metrics.keys():
-#         if not ("skill" in metric or "baseline" in metric):
-#             metric_names.append(metric)
-#     metric_names = np.unique(metric_names)
-
-#     # Define the colors for the bars
-#     colors = kwargs.get("colors", plt.cm.tab20.colors)
-
-#     ax1_labels = []
-#     # Plot the performance metrics
-#     for i, metric in enumerate(metric_names):
-#         model_metric = metrics[metric]
-#         baseline_metric = metrics[f"{metric}_baseline"]
-#         var = metric.split("_")[-1].lower()
-#         unit = units.get(var, "")
-#         ax1.bar(
-#             [i * 3],
-#             [model_metric],
-#             color=colors[i % len(colors)],
-#             label=f"{model_name} {metric} ({unit})",
-#             hatch=kwargs.get("model_hatch", None),
-#         )
-
-#         ax1.bar(
-#             [i * 3 + 1],
-#             [baseline_metric],
-#             color=colors[i % len(colors)],
-#             label=f"{baseline_name} {metric} ({unit})",
-#             hatch=kwargs.get("baseline_hatch", "//"),
-#         )
-
-#         ax1.set_ylabel("Score")
-#         ax1.set_title("Performance Metrics")
-
-#         ax1_labels += [f"{model_name} metric", f"{baseline_name} {metric}", ""]
-
-#         if kwargs.get("skill", True):
-#             ax2.bar(
-#                 [i],
-#                 [metrics[f"{metric}_skill"]],
-#                 color=colors[i % len(colors)],
-#                 label=f"{metric} Skill Score",
-#                 hatch=kwargs.get("skill_hatch", None),
-#             )
-#             ax2.set_ylabel("Skill Score (1 - model/baseline)")
-#             ax2.set_title("Skill Scores")
-
-#     ax1.set_xticks(range(len(metric_names) * 3))
-#     ax1.set_xticklabels([""] * len(ax1_labels))
-#     ax1.legend(loc="lower right", framealpha=0.5)
-
-#     if kwargs.get("skill", True):
-#         ax2.set_xticks(range(len(metric_names)))
-#         ax2.set_xticklabels([""] * len(metric_names))
-#         ax2.legend(loc="lower right", framealpha=0.5)
 
 
 def _DPE(reference, predictions, **kwargs):
@@ -1252,13 +1042,24 @@ def _CARTE(reference, predictions, **kwargs):
     # Column maps
     ref_col_dict = kwargs.get("ref_columns", None)
     if ref_col_dict is None:
-        ref_cols = {"SID": "SID", "lat": "LAT", "lon": "LON", "initial_time": "ISO_TIME"}
+        ref_cols = {
+            "SID": "SID",
+            "lat": "LAT",
+            "lon": "LON",
+            "initial_time": "ISO_TIME",
+        }
     else:
         ref_cols = ref_col_dict
 
     pred_col_dict = kwargs.get("pred_columns", None)
     if pred_col_dict is None:
-        pred_cols = {"SID": "SID", "lat": "lat", "lon": "lon", "valid_time": "Valid Time", "init_time": "Initial Time"}
+        pred_cols = {
+            "SID": "SID",
+            "lat": "lat",
+            "lon": "lon",
+            "valid_time": "Valid Time",
+            "init_time": "Initial Time",
+        }
     else:
         pred_cols = pred_col_dict
 
@@ -1278,7 +1079,9 @@ def _CARTE(reference, predictions, **kwargs):
     preds[pred_cols["init_time"]] = pd.to_datetime(preds[pred_cols["init_time"]])
 
     # Output scaffold aligned to caller
-    out = pd.DataFrame(index=preds.index, columns=["Along_TE", "Cross_TE", "DPE_cart"], dtype=float)
+    out = pd.DataFrame(
+        index=preds.index, columns=["Along_TE", "Cross_TE", "DPE_cart"], dtype=float
+    )
 
     # Helper: numerically safe, NaN-aware, segment-projection (not infinite line)
     def compute_errors_cart(ref_start, ref_end, pred_slice):
@@ -1301,8 +1104,8 @@ def _CARTE(reference, predictions, **kwargs):
         rsy = np.asarray(rsy, dtype=np.float64)
         rex = np.asarray(rex, dtype=np.float64)
         rey = np.asarray(rey, dtype=np.float64)
-        px  = np.asarray(px,  dtype=np.float64)
-        py  = np.asarray(py,  dtype=np.float64)
+        px = np.asarray(px, dtype=np.float64)
+        py = np.asarray(py, dtype=np.float64)
 
         n = px.shape[0]
         # Default outputs
@@ -1312,9 +1115,12 @@ def _CARTE(reference, predictions, **kwargs):
 
         # Most slices have a single ref_start/ref_end row; handle that as scalars
         if rsx.size == 1 and rex.size == 1:
-            Sx = float(rsx.reshape(-1)[0]); Sy = float(rsy.reshape(-1)[0])
-            Ex = float(rex.reshape(-1)[0]); Ey = float(rey.reshape(-1)[0])
-            dx = Ex - Sx; dy = Ey - Sy
+            Sx = float(rsx.reshape(-1)[0])
+            Sy = float(rsy.reshape(-1)[0])
+            Ex = float(rex.reshape(-1)[0])
+            Ey = float(rey.reshape(-1)[0])
+            dx = Ex - Sx
+            dy = Ey - Sy
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 seg_norm2 = dx * dx + dy * dy
             if not np.isfinite(seg_norm2) or seg_norm2 <= 1e-12 or seg_norm2 > 1e20:
@@ -1327,7 +1133,7 @@ def _CARTE(reference, predictions, **kwargs):
             projy = Sy + t * dy
             cte = np.sqrt((px - projx) ** 2 + (py - projy) ** 2)
             ate = np.sqrt((Ex - projx) ** 2 + (Ey - projy) ** 2)
-            cdpe = np.sqrt(ate ** 2 + cte ** 2)
+            cdpe = np.sqrt(ate**2 + cte**2)
             return ate, cte, cdpe
 
         # General vectorized path (rare) — lengths must match
@@ -1344,8 +1150,12 @@ def _CARTE(reference, predictions, **kwargs):
         if px.shape[0] != dx.shape[0]:
             # Fallback: compute pointwise using the first valid segment entry
             k = int(np.flatnonzero(vm)[0])
-            Sx = float(rsx[k]); Sy = float(rsy[k]); Ex = float(rex[k]); Ey = float(rey[k])
-            dxk = Ex - Sx; dyk = Ey - Sy
+            Sx = float(rsx[k])
+            Sy = float(rsy[k])
+            Ex = float(rex[k])
+            Ey = float(rey[k])
+            dxk = Ex - Sx
+            dyk = Ey - Sy
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 segn2 = dxk * dxk + dyk * dyk
             if not np.isfinite(segn2) or segn2 <= 1e-12 or segn2 > 1e20:
@@ -1357,7 +1167,7 @@ def _CARTE(reference, predictions, **kwargs):
             projy = Sy + t * dyk
             cte = np.sqrt((px - projx) ** 2 + (py - projy) ** 2)
             ate = np.sqrt((Ex - projx) ** 2 + (Ey - projy) ** 2)
-            cdpe = np.sqrt(ate ** 2 + cte ** 2)
+            cdpe = np.sqrt(ate**2 + cte**2)
             return ate, cte, cdpe
 
         # Fully vectorized case (matching lengths)
@@ -1368,7 +1178,7 @@ def _CARTE(reference, predictions, **kwargs):
         projy = rsy + t * dy
         cte = np.sqrt((px - projx) ** 2 + (py - projy) ** 2)
         ate = np.sqrt((rex - projx) ** 2 + (rey - projy) ** 2)
-        cdpe = np.sqrt(ate ** 2 + cte ** 2)
+        cdpe = np.sqrt(ate**2 + cte**2)
         return ate, cte, cdpe
 
     # Iterate storms present in both
@@ -1389,7 +1199,9 @@ def _CARTE(reference, predictions, **kwargs):
                 ensemble_dim = c
                 break
         if not probabilistic:
-            pred_data = pred_data.drop_duplicates(subset=[pred_cols["valid_time"], pred_cols["init_time"]], keep="first")
+            pred_data = pred_data.drop_duplicates(
+                subset=[pred_cols["valid_time"], pred_cols["init_time"]], keep="first"
+            )
 
         # Pre-allocate
         pred_data["Along_TE"] = np.nan
@@ -1399,38 +1211,59 @@ def _CARTE(reference, predictions, **kwargs):
         # Loop by valid time (and per member if probabilistic)
         for val_time in pred_data[pred_cols["valid_time"]].dropna().unique():
             ref_end = ref_data[ref_data[ref_cols["initial_time"]] == val_time]
-            ref_start = ref_data[ref_data[ref_cols["initial_time"]] == (pd.to_datetime(val_time) - pd.Timedelta(hours=6))]
+            ref_start = ref_data[
+                ref_data[ref_cols["initial_time"]]
+                == (pd.to_datetime(val_time) - pd.Timedelta(hours=6))
+            ]
             if ref_start.empty or ref_end.empty:
                 continue
             # Drop any rows with non-finite coords in the segment endpoints
-            if not np.isfinite(ref_start[ref_cols["lat"]]).all() or not np.isfinite(ref_start[ref_cols["lon"]]).all():
+            if (
+                not np.isfinite(ref_start[ref_cols["lat"]]).all()
+                or not np.isfinite(ref_start[ref_cols["lon"]]).all()
+            ):
                 continue
-            if not np.isfinite(ref_end[ref_cols["lat"]]).all() or not np.isfinite(ref_end[ref_cols["lon"]]).all():
+            if (
+                not np.isfinite(ref_end[ref_cols["lat"]]).all()
+                or not np.isfinite(ref_end[ref_cols["lon"]]).all()
+            ):
                 continue
 
             slice_all = pred_data[pred_data[pred_cols["valid_time"]] == val_time]
             if not probabilistic:
                 ate, cte, cdpe = compute_errors_cart(ref_start, ref_end, slice_all)
-                pred_data.loc[slice_all.index, ["Along_TE", "Cross_TE", "DPE_cart"]] = np.vstack([ate, cte, cdpe]).T
+                pred_data.loc[slice_all.index, ["Along_TE", "Cross_TE", "DPE_cart"]] = (
+                    np.vstack([ate, cte, cdpe]).T
+                )
             else:
                 for member in slice_all[ensemble_dim].dropna().unique():
                     mslice = slice_all[slice_all[ensemble_dim] == member]
                     if mslice.empty:
                         continue
                     ate, cte, cdpe = compute_errors_cart(ref_start, ref_end, mslice)
-                    pred_data.loc[mslice.index, ["Along_TE", "Cross_TE", "DPE_cart"]] = np.vstack([ate, cte, cdpe]).T
+                    pred_data.loc[
+                        mslice.index, ["Along_TE", "Cross_TE", "DPE_cart"]
+                    ] = np.vstack([ate, cte, cdpe]).T
 
         # Robust: if columns were not set for some rows, reindex creates them with NaN instead of raising
         return pred_data.reindex(columns=["Along_TE", "Cross_TE", "DPE_cart"])
 
     # Parallel per storm
-    results = jl.Parallel(n_jobs=6, prefer="threads")(jl.delayed(process_one)(sid) for sid in storm_list)
-    temp_df = pd.concat(results, axis=0) if len(results) else pd.DataFrame(columns=["Along_TE", "Cross_TE", "DPE_cart"])
+    results = jl.Parallel(n_jobs=6, prefer="threads")(
+        jl.delayed(process_one)(sid) for sid in storm_list
+    )
+    temp_df = (
+        pd.concat(results, axis=0)
+        if len(results)
+        else pd.DataFrame(columns=["Along_TE", "Cross_TE", "DPE_cart"])
+    )
 
     # Align to caller order
     overlap = temp_df.index.intersection(preds.index)
     if len(overlap):
-        out.loc[overlap, ["Along_TE", "Cross_TE", "DPE_cart"]] = temp_df.loc[overlap, ["Along_TE", "Cross_TE", "DPE_cart"]].to_numpy()
+        out.loc[overlap, ["Along_TE", "Cross_TE", "DPE_cart"]] = temp_df.loc[
+            overlap, ["Along_TE", "Cross_TE", "DPE_cart"]
+        ].to_numpy()
 
     return out.to_numpy()
 

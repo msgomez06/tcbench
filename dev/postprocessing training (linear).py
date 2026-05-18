@@ -21,7 +21,6 @@ import zarr as zr
 # from dask import optimize
 import time
 
-
 # Backend Libraries
 import joblib as jl
 
@@ -41,7 +40,7 @@ def transform_data(data, scaler):
 # %%
 if __name__ == "__main__":
     # emulate system arguments
-    emulate = True
+    emulate = False  # Set to True to emulate command line arguments in Jupyter
     # Simulate command line arguments
     if emulate:
         sys.argv = [
@@ -74,7 +73,7 @@ if __name__ == "__main__":
         torch.multiprocessing.set_start_method("spawn", force=True)
 
     # Read in arguments with argparse
-    parser = argparse.ArgumentParser(description="Train an MLR model")
+    parser = argparse.ArgumentParser(description="Train an linear model model")
     parser.add_argument(
         "--datadir",
         type=str,
@@ -214,7 +213,7 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to use dask arrays for the dataset",
     )
-    
+
     parser.add_argument(
         "--mask_ptile",
         type=int,
@@ -236,7 +235,7 @@ if __name__ == "__main__":
     )
     result_dir = args.result_dir
     if args.mask_ptile != 84:
-        cache_dir = cache_dir+ f"_{args.mask_ptile}ptile"
+        cache_dir = cache_dir + f"_{args.mask_ptile}ptile"
         result_dir = result_dir + f"_{args.mask_ptile}ptile"
 
         if not os.path.exists(result_dir):
@@ -392,7 +391,6 @@ if __name__ == "__main__":
     train_x = train_x[~nan_idxs]
     train_target = train_target[~nan_idxs]
 
-    
     # nan filtering the validation set - TODO: investigate why ERA5 preprocessed data has nans in validation set
     nan_idxs = np.isnan(valid_x).any(axis=1)
     valid_x = valid_x[~nan_idxs]
@@ -448,18 +446,18 @@ if __name__ == "__main__":
     #     input("Press Enter to continue...")
     #  Model
     # # We begin by instantiating our baseline model
-    # MLR = baselines.TorchMLRv2(
+    # model = baselines.TorchMLRv2(
     #     deterministic=True if args.mode == "deterministic" else False,
     #     num_scalars=train_x.shape[1],
     # )
-    MLR = baselines.ANN(
+    model = baselines.ANN(
         deterministic=True if args.mode == "deterministic" else False,
         num_scalars=train_x.shape[1],
         activation_function=torch.nn.LeakyReLU,
     )
-    MLR.to(calc_device)
+    model.to(calc_device)
 
-    optimizer = torch.optim.Adam(MLR.parameters(), lr=1e-4)  # , weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)  # , weight_decay=1e-4)
     # scheduler = torch.optim.lr_scheduler.CyclicLR(
     #     optimizer, base_lr=1e-5, max_lr=1e-3, step_size_up=10
     # )
@@ -490,7 +488,7 @@ if __name__ == "__main__":
             i += 1
             optimizer.zero_grad()
 
-            prediction = MLR(x=x)
+            prediction = model(x=x)
 
             # if args.aux_loss:
             #     base_loss = loss_func(
@@ -550,7 +548,7 @@ if __name__ == "__main__":
         with torch.no_grad():
             for x, y in validation_loader:
                 i += 1
-                prediction = MLR(x=x)
+                prediction = model(x=x)
 
                 # if args.aux_loss:
                 #     base_loss = loss_func(
@@ -656,10 +654,10 @@ if __name__ == "__main__":
         # Save if the validation loss is the best so far
         if val_loss <= max(val_losses):
             torch.save(
-                MLR,
+                model,
                 os.path.join(
                     result_dir,
-                    f"{str(MLR)}_{start_time}_epoch-{epoch+1}_{args.ai_model}_{args.mode}_{mask_flag}.pt",
+                    f"{str(model)}_{start_time}_epoch-{epoch+1}_{args.ai_model}_{args.mode}_{mask_flag}.pt",
                 ),
             )
 
@@ -691,7 +689,7 @@ if __name__ == "__main__":
         with open(
             os.path.join(
                 result_dir,
-                f"{str(MLR)}_losses_{start_time}_{args.ai_model}_{args.mode}_{mask_flag}.pkl",
+                f"{str(model)}_losses_{start_time}_{args.ai_model}_{args.mode}_{mask_flag}.pkl",
             ),
             "wb",
         ) as f:
@@ -722,7 +720,7 @@ if __name__ == "__main__":
         fig.savefig(
             os.path.join(
                 result_dir,
-                f"{str(MLR)}_{args.ai_model}_losses_{start_time}_{mask_flag}.png",
+                f"{str(model)}_{args.ai_model}_losses_{start_time}_{mask_flag}.png",
             )
         )
         plt.close(fig)

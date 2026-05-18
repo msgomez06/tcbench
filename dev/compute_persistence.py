@@ -27,10 +27,8 @@ from datetime import timedelta
 from utils import toolbox
 
 # Default location where evaluate scripts save figures/results
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
-IB_PATH = (
-    "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-)
+EVAL_DIR = os.path.join(os.curdir, "outputs")
+IB_PATH = os.path.join(os.curdir, "data", "ibtracs")
 
 # Leads to compute (hours)
 LEADS = list(range(6, 121, 6))
@@ -185,12 +183,12 @@ def build_persistence(
     out_df.to_csv(out_path, index=False)
     print(f"✅ Saved persistence baseline: {out_path}  (rows={len(out_df)})")
 
-    # Save a tracks-like CSV that downstream evaluators
+    # Save a tracks-like CSV that downstream evaluators (e.g., evaluate_tracks_RI)
     # can ingest. Initial times are restricted to 00/12Z; Valid Time remains 6‑hourly.
     if forecast_rows:
         tracks_df = pd.concat(forecast_rows, ignore_index=True)
         tracks_df.sort_values(["SID", "Initial Time", "Valid Time"], inplace=True)
-        tracks_path = os.path.join(eval_dir, "persistence.csv")
+        tracks_path = os.path.join(eval_dir, "persistence_tracks.csv")
         tracks_df.to_csv(tracks_path, index=False)
         print(f"✅ Saved persistence tracks: {tracks_path}  (rows={len(tracks_df)})")
     else:

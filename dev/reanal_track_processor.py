@@ -37,15 +37,11 @@ parser.add_argument(
 args = parser.parse_args()
 
 # %%
-target_dir = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/ilia/"
+
 seasons = toolbox.get_TC_seasons(
-    season_list=[args.season],
-    datadir_path=target_dir,
+    season_list=[2023],  # *range(2019, 2020)],
+    datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
 )
-# seasons = toolbox.get_TC_seasons(
-#     season_list=[2023],  # *range(2019, 2020)],
-#     datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
-# )
 
 # %%
 # get the list of files in the target directory for each season

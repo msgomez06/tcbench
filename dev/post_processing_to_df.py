@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Tue Jun 13 10:57:33 2023
-
-Script to test handling of a single track
-
-@author: mgomezd1
-"""
 
 # %% Imports
 # OS and IO
@@ -45,11 +38,11 @@ warnings.filterwarnings("ignore", module="dask")
 
 # %%
 
+model_dir = os.path.join(os.curdir, "postproc_models")
+results_dir = os.path.join(os.curdir, "outputs")
+
 full_data = toolbox.read_hist_track_file(
-    tracks_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-)
-results_dir = (
-    "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/"
+    tracks_path=os.path.join(os.curdir, "data", "ibtracs")
 )
 
 year = 2023
@@ -63,11 +56,10 @@ if __name__ == "__main__":
 
     calc_device = torch.device("cpu")
 
-    # ai_model = "panguweather"
-    ai_model = "fourcastnetv2"
+    ai_model = "panguweather"
     magangle = True
 
-    cache_dir = f"/scratch/mgomezd1/cache/_{ai_model}"
+    cache_dir = os.path.join(os.curdir, "data", "cache")
 
     AI_scaler = None
     fpath = os.path.join(cache_dir, "AI_scaler.pkl")
@@ -100,61 +92,34 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Target scaler not found at {fpath}")
 
     mask_inputs = True
-    mask_path = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/dev/results/mask_dict.pkl"
+    mask_path = os.path.join(os.curdir, "data", "mask_dict.pkl")
     with open(mask_path, "rb") as f:
         mask_dict = pickle.load(f)["linear"]
 
     # Load the MLR model
-    ## Panguweather models
-    # models_to_load = [
-    #     {
-    #         "filepath": f"{results_dir+'torch_models/'}TorchMLR_03-26-10h27_epoch-20_panguweather_probabilistic_masked.pt",
-    #         "masked": True,
-    #         "probabilistic": True,
-    #         "tag": "MLR (Masked)",
-    #         "results": {},
-    #         "deep": False,
-    #     },
-    #     {
-    #         "filepath": f"{results_dir+'torch_models/'}SimpleANN_02-03-08h29_epoch-14_panguweather_probabilistic_masked.pt",
-    #         "masked": True,
-    #         "probabilistic": True,
-    #         "tag": "ANN (LeakyReLU, M)",
-    #         "results": {},
-    #         "deep": False,
-    #     },
-    #     {
-    #         "filepath": f"{results_dir+'torch_models/'}UNet_v2_06-18-20h11_epoch-6_panguweather-probabilistic.pt",
-    #         "masked": True,
-    #         "probabilistic": True,
-    #         "tag": "UNetv2 (dout 0.33)",
-    #         "results": [],
-    #         "deep": True,
-    #     },
-    # ]
-    ## FourCastNetV2 models
+    # Load the models to evaluate
     models_to_load = [
         {
-            "filepath": f"{results_dir+'torch_models/'}TorchMLR_01-31-12h20_epoch-20_fourcastnetv2_probabilistic_masked.pt",
+            "filepath": os.path.join(model_dir, "Probabilistic_ANN_masked.pt"),
             "masked": True,
             "probabilistic": True,
-            "tag": "MLR (Masked)",
+            "tag": "Probabilistic ANN (M)",
             "results": {},
             "deep": False,
         },
         {
-            "filepath": f"{results_dir+'torch_models/'}SimpleANN_02-03-08h36_epoch-13_fourcastnetv2_probabilistic_masked.pt",
+            "filepath": os.path.join(model_dir, "Probabilistic_MLR_masked.pt"),
             "masked": True,
             "probabilistic": True,
-            "tag": "ANN (LeakyReLU, M)",
+            "tag": "Probabilistic MLR (M)",
             "results": {},
             "deep": False,
         },
         {
-            "filepath": f"{results_dir+'torch_models/'}UNet_v2_06-24-16h26_epoch-9_fourcastnetv2-probabilistic.pt",
+            "filepath": os.path.join(model_dir, "Probabilistic_UNet_masked.pt"),
             "masked": True,
             "probabilistic": True,
-            "tag": "UNetv2 (dout 0.33)",
+            "tag": "Probabilistic UNet (M)",
             "results": [],
             "deep": True,
         },
@@ -189,7 +154,7 @@ if __name__ == "__main__":
                 pres=storm[
                     constants.ibtracs_cols._track_cols__metadata.get("PRES")
                 ].to_numpy(),
-                datadir_path="/work/FAC/FGSE/IDYST/tbeucler/default/raw_data/TCBench_alpha",
+                datadir_path=os.path.join(os.curdir, "data"),
                 storm_season=storm.SEASON.iloc[0],
                 ai_model=ai_model,
             )
@@ -454,7 +419,7 @@ for model_name, model_df in model_dfs.items():
     except Exception as e:
         print(f"Error dropping columns: {e}")
     model_df.to_csv(
-        f"{results_dir}postprocessing_{ai_model}_0shot_{model_name.replace(' ', '_').replace('(', '').replace(')', '')}_{year}.csv",
+        f"{results_dir}postprocessing_panguweather_0shot_{model_name.replace(' ', '_').replace('(', '').replace(')', '')}_{year}.csv",
         index=False,
     )
 

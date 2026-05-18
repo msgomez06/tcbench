@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 
 
-from utils import toolbox, constants
+from utils import toolbox
 from utils.toolbox import *
 from utils import data_lib as dlib
 import metrics_test as metrics
@@ -30,6 +30,7 @@ def evaluate_tracks(
     save_results: bool = True,
     return_dataframes: bool = True,
     verbose: bool = True,
+    ri_verbose: bool | None = False,
 ):
     """
     Evaluate track CSV files in `eval_folder`, compute metrics against IBTrACS, and
@@ -59,6 +60,10 @@ def evaluate_tracks(
         If True, return a dict of model name -> results DataFrame.
     verbose : bool
         Print progress.
+    ri_verbose : bool | None
+        Controls verbosity **inside the RI subroutine** only. Default is `False` (quiet).
+        If `None`, it mirrors `verbose`. Set `True` to enable RI debug prints while
+        keeping `evaluate_tracks` progress logs separate.
 
     Note: initializations are restricted to synoptic hours {0, 12}.
 
@@ -71,6 +76,7 @@ def evaluate_tracks(
     all_cases_df : pd.DataFrame
         Unique (SID, Initial Time, Valid Time) keys observed across all evaluated files.
     """
+    ri_verbose = verbose if (ri_verbose is None) else ri_verbose
     # --- Load IBTrACS and filter year
     ibtracs = toolbox.read_hist_track_file(tracks_path=ibtracs_tracks_path)
     ibtracs = ibtracs[pd.to_datetime(ibtracs["ISO_TIME"]).dt.year == year]
@@ -113,7 +119,6 @@ def evaluate_tracks(
             print(
                 f"Candidates in '{eval_folder}': {len(track_files_all)} | to compute (recompute=True): {len(track_files)}"
             )
-            print(track_files)
         else:
             mode = "RI missing" if only_ri else "no _results.csv yet"
             print(
@@ -151,7 +156,7 @@ def evaluate_tracks(
                         keep_intensification=False,
                         select_files=[track_file],
                         recompute=recompute,
-                        verbose=verbose,
+                        verbose=ri_verbose,
                     )
                 except Exception as e:
                     print(f"[RI] Warning: could not compute RI for {track_file}: {e}")
@@ -165,6 +170,14 @@ def evaluate_tracks(
 
         # Read the track file
         track_df = pd.read_csv(os.path.join(eval_folder, track_file))
+
+        # Defensive: drop duplicated column labels if any (e.g., accidental 'ref_time' duplicates)
+        _cols = pd.Series(track_df.columns)
+        if _cols.duplicated().any():
+            if verbose:
+                dups = list(_cols[_cols.duplicated(keep=False)])
+                print(f"Warning: duplicated columns in {track_file}: {dups} — keeping first.")
+            track_df = track_df.loc[:, ~_cols.duplicated(keep='first')]
 
         # If post-processing file, normalize column names
         if postproc and "pres min" in track_df.columns:
@@ -297,7 +310,7 @@ def evaluate_tracks(
                     keep_intensification=False,
                     select_files=[track_file],
                     recompute=recompute,
-                    verbose=verbose,
+                    verbose=ri_verbose,
                 )
             except Exception as e:
                 print(f"[RI] Warning: could not compute RI for {track_file}: {e}")
@@ -318,10 +331,8 @@ def evaluate_tracks(
 
 if __name__ == "__main__":
     # Backward-compatible script entrypoint with current defaults
-    eval_folder = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
-    ibtracs_dir = (
-        "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-    )
+    eval_folder = os.path.join(os.curdir, "outputs")
+    ibtracs_dir = os.path.join(os.curdir, "data", "ibtracs")
     paths, dfs, keys = evaluate_tracks(
         eval_folder=eval_folder,
         ibtracs_tracks_path=ibtracs_dir,

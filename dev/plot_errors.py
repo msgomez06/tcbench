@@ -1,101 +1,4 @@
-"""
-TCBench error & coverage plotting utilities
-===========================================
-
-Author: Samuel Darmon
-
-This module generates the figures we use in the TCBench paper
-(track, intensity, FAIR comparisons and coverage). It is meant to be run
-interactively from a Python shell / notebook as well as imported from other
-scripts.
-
-What this script does
----------------------
-- Loads 2023 IBTrACS tracks and precomputes denominators for coverage.
-- Reads all model evaluation CSVs from `EVAL_DIR` (TCBench Results directory),
-  including baselines (persistence, climatology).
-- Harmonizes metric columns (DPE, CARTE metrics, AE/SE, CRPS, RI_CSI, etc.).
-- Produces three main families of figures:
-
-  1. `plot_raw_comparison(...)`
-     Native-coverage comparison of all models on:
-       - Track errors (DPE, CARTE)
-       - Intensity errors (wind & MSLP)
-       - CRPS panels with persistence MAE overlays.
-
-  2. `plot_fair_comparison(...)`
-     FAIR comparison where each model is filled with persistence on the IBTrACS
-     verification grid, plus a separate coverage figure (% of IB pairs covered).
-
-  3. `plot_tiered_model_sets(...)`
-     Tiered panels that progressively add:
-       - physical models only
-       - physical + AI models
-       - physical + AI + post-processing models.
-
-  4. RI plotting helpers
-     - `_find_ri_series(...)` locates and aggregates RI_CSI sidecar files.
-     - The tiered figures use RI_CSI as a dedicated 4th panel (RI vs lead).
-
-Input expectations
-------------------
-- `EVAL_DIR` must point to the directory containing the per-model
-  `*_results.csv` files produced by the TCBench evaluation pipeline.
-- IBTrACS 2023 track files must be available under:
-  `/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/`
-  (as used by `utils.toolbox.read_hist_track_file`).
-- A `persistence_results.csv` file in `EVAL_DIR` is required for FAIR comparisons
-  and for MAE overlays on CRPS panels.
-- An optional `2023_climatology_results.csv` in `EVAL_DIR` is used as the
-  "Mean Tendency by Lead & Basin (MT-LB)" baseline.
-
-How to use it interactively
----------------------------
-From the `dev/` directory of `alpha_bench` on the cluster:
-
-  >>> from plot_errors import (
-  ...     plot_raw_comparison,
-  ...     plot_fair_comparison,
-  ...     plot_tiered_model_sets,
-  ... )
-
-  # 1) Raw comparison (on native coverage)
-  >>> fig_raw = plot_raw_comparison(
-  ...     save=True,
-  ...     save_path="TCBench_raw_comparison.pdf",
-  ...     show=False,
-  ... )
-
-  # 2) FAIR comparison + coverage
-  >>> fig_fair, fig_cov = plot_fair_comparison(
-  ...     save=True,
-  ...     save_path="TCBench_fair_comparison.pdf",
-  ...     save_cov_path="TCBench_coverage.pdf",
-  ...     show=False,
-  ... )
-
-  # 3) Tiered physical/AI/post-processing comparison
-  >>> figs_tiers = plot_tiered_model_sets(
-  ...     save=True,
-  ...     out_prefix="TCBench_tiers",
-  ...     fmt="pdf",
-  ...     show=False,
-  ... )
-
-The file is structured with `# %%` cell markers so it can also be driven from an
-interactive environment (VS Code, IPython, Jupyter) by running the cells and
-calling the functions above.
-
-Notes
------
-- Large input CSVs and track files live on the shared filesystem and are NOT
-  committed to git; this module only assumes they are present where `EVAL_DIR`
-  and the IBTrACS paths point.
-- Styling (fonts, colors, legend ordering) is tuned for the figures in the
-  TCBench paper, but can be adjusted if needed.
-"""
-
-# %% RAW comparison (per-lead-time error curves, native coverage)
+# %% Plot: per-lead-time error curves with error bars (paired subplots)
 import os
 import numpy as np
 import pandas as pd
@@ -104,28 +7,21 @@ from itertools import cycle
 import matplotlib as mpl
 import matplotlib.ticker as mticker
 from utils import toolbox
+from matplotlib.colors import TwoSlopeNorm, LinearSegmentedColormap
 
 # Toolbox helper aliases for explicit usage
 from utils.toolbox import load_eval_csv as _load_eval_csv
-from utils.toolbox import pick_metric_col as _pick_metric_col
 from utils.toolbox import compute_r2_by_lead_from_results as _r2_from_results
 from utils.toolbox import pick_metric_col
 
-# Set things up for CLI running
-import sys
-import argparse
 
-parser = argparse.ArgumentParser(
-    description="Plot TCBench error comparisons and coverage."
-)
-parser.add_argument(
-    "ibtracs_path",
-    type=str,
-    help="Path to the IBTrACS track folder containing the file (CSV) for 2023, used for coverage computation.",
-    default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/",
-)
 
-args = parser.parse_args()
+# --- Silence all stdout/stderr prints and warnings in this module
+import warnings as _warnings
+def _log(*args, **kwargs):
+    return
+print = _log  # make all prints no-ops inside this module
+_warnings.filterwarnings("ignore")
 
 
 mpl.rcParams.update(
@@ -141,13 +37,839 @@ mpl.rcParams.update(
     }
 )
 
+# helpers for naming quantile aggregations
+def q25(s):
+    return s.quantile(0.25)
+
+
+def q75(s):
+    return s.quantile(0.75)
+
+
+EVAL_DIR = os.path.join(os.curdir, "outputs")
+
+PERSIST_PATH = os.path.join(EVAL_DIR, "persistence_results.csv")
+_persist_raw = None
+if os.path.exists(PERSIST_PATH):
+    try:
+        _persist_raw = pd.read_csv(PERSIST_PATH, low_memory=False)
+        for c in ("Initial Time", "Valid Time"):
+            if c in _persist_raw.columns:
+                _persist_raw[c] = pd.to_datetime(_persist_raw[c], errors="coerce")
+        if {"Initial Time", "Valid Time"}.issubset(_persist_raw.columns):
+            _persist_raw["lead_hours"] = (
+                _persist_raw["Valid Time"] - _persist_raw["Initial Time"]
+            ).dt.total_seconds() / 3600.0
+    except Exception as _e:
+        print(f"⚠️ Could not load persistence_results.csv for MAE overlay: {_e}")
+
+# ---- IBTrACS 2023 (ground-truth key set for coverage) — STRICT (no fallbacks) ----
+if toolbox is None:
+    raise RuntimeError(
+        "IBTrACS toolbox is required but not available: cannot compute coverage without IBTrACS."
+    )
 try:
-    from utils import toolbox  # provided in this repo
-except Exception:
-    toolbox = None
-# --- Shared helpers across all figures (module-level) ---
+    ibtracs = toolbox.read_hist_track_file(
+        tracks_path=os.path.join(os.curdir, "data", "ibtracs")
+    )
+    ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023].copy()
+    if ibtracs.empty:
+        raise RuntimeError("Loaded IBTrACS (2023) is empty.")
+except Exception as _e:
+    raise RuntimeError(f"Failed to load IBTrACS for coverage denominator: {_e}")
+
+# --- collect result files but blacklist unwanted ones
+result_files = sorted(
+    [
+        f
+        for f in os.listdir(EVAL_DIR)
+        if ("RI" not in f) and (f.endswith("_results.csv") or ("baseline" in f))
+    ]
+)
+
+# keep only the ANN post-processing variant among postprocessing_* files
+_PP_KEEP = "postprocessing_panguweather_ann"
+result_files = [
+    f
+    for f in result_files
+    if ("postprocessing" not in f.lower()) or (_PP_KEEP in f.lower())
+]
+
+# Ensure climatology baseline is included if present
+CLIM_FILE = os.path.join(EVAL_DIR, "2023_climatology_results.csv")
+if os.path.exists(CLIM_FILE):
+    clim_name = os.path.basename(CLIM_FILE)
+    if clim_name not in result_files:
+        result_files.append(clim_name)
+
+blacklist_substr = [
+    "Gencast",  # keep filtering Gencast
+    "TIGGE_IFS",  # drop any IFS variant (results, corrected, clean)
+]
+result_files = [f for f in result_files if not any(b in f for b in blacklist_substr)]
+if not result_files:
+    raise FileNotFoundError("No *_results.csv files found in EVAL_DIR after filtering.")
+
+# --- consolidate duplicates that map to the same logical forecast (e.g., GEFS vs GEFS_clean)
+# define a base key (label) by stripping common suffixes
+strip_tokens = ["_clean", "_corrected", "(downloaded)", "_results"]
+
+
+def base_key(fname: str) -> str:
+    key = fname.replace("_results.csv", "")
+    for t in strip_tokens:
+        key = key.replace(t, "")
+    return key
+
+
+# variant ranking: prefer clean > corrected > base
+variant_rank = {"_clean": 3, "_corrected": 2}
+
+
+def rank_of(fname: str) -> int:
+    for tok, r in variant_rank.items():
+        if tok in fname:
+            return r
+    return 1  # base
+
+
+best = {}
+for f in result_files:
+    k = base_key(f)
+    r = rank_of(f)
+    if (k not in best) or (r > best[k][0]):
+        best[k] = (r, f)
+
+# keep only the chosen representative files
+result_files = [v[1] for v in best.values()]
+result_files.sort()
+
+SHOW_COUNTS = False  # plot sample size per lead on a right-hand y-axis
+
+# === Panel grid (3 rows x 4 cols) ===
+# Row 1: Track metrics (4 panels)
+# Row 2: Pressure: AE, R², CRPS, (empty)
+# Row 3: Wind:     AE, R², CRPS, (empty)
+PANEL_GRID = [
+    ["DPE_GCD", "CRPS_haversine", "Along_TE"],
+    ["AE_pressure", "R2_pressure", "CRPS_pmin"],
+    ["AE_wind", "R2_wind", "CRPS_vmax"],
+]
+
+# Helpers
+ALL_BASES = [b for row in PANEL_GRID for b in row if b is not None]
+NON_R2_BASES = [b for b in ALL_BASES if not str(b).startswith("R2_")]
+
+NICE_NAME = {
+    # TRACK position metrics
+    "DPE_GCD": "Track — direct position error (DPE)",
+    "CRPS_haversine": "Track — CRPS (track displacement)",
+    # TRACK geometry (CARTE)
+    "Along_TE": "Track — along-track error (CARTE)",
+    "Cross_TE": "Track — cross-track error (CARTE)",
+    "DPE_cart": "Track — direct position error (CARTE)",
+    # INTENSITY metrics
+    "AE_wind": "Intensity — abs. error (max wind)",
+    "SE_wind": "Intensity — squared error (max wind)",
+    "CRPS_vmax": "Intensity — CRPS (max wind)",
+    "AE_pressure": "Intensity — abs. error (min pressure)",
+    "SE_pressure": "Intensity — squared error (min pressure)",
+    "CRPS_pmin": "Intensity — CRPS (min pressure)",
+}
+
+UNITS = {
+    "DPE_GCD": "km",
+    "CRPS_haversine": "km",
+    "AE_wind": "kt",
+    "SE_wind": "kt²",
+    "CRPS_vmax": "kt",
+    "AE_pressure": "hPa",
+    "SE_pressure": "hPa²",
+    "CRPS_pmin": "hPa",
+    "Along_TE": "km",
+    "Cross_TE": "km",
+    "DPE_cart": "km",
+}
+
+# --- Add R² (unitless) entries
+NICE_NAME.update(
+    {
+        "R2_pressure": "Intensity — Coefficient of Determination (Pressure)",
+        "R2_wind": "Intensity — Coefficient of Determination (Wind)",
+    }
+)
+UNITS.update(
+    {
+        "R2_pressure": "",  # unitless
+        "R2_wind": "",  # unitless
+    }
+)
+
+# --- Short title map for panels
+SHORT_TITLE = {
+    "DPE_GCD": "DPE — track",
+    "CRPS_haversine": "CRPS — track",
+    "Along_TE": "Along‑track error",
+    "Cross_TE": "Cross‑track error",
+    "AE_pressure": "AE — pressure",
+    "CRPS_pmin": "CRPS — pressure",
+    "AE_wind": "AE — wind",
+    "CRPS_vmax": "CRPS — wind",
+    "R2_pressure": "R² — pressure",
+    "R2_wind": "R² — wind",
+}
+
+YLIMS = {
+    "DPE_GCD": (0, 2000),
+    "Cross_TE": (0, 900),
+    "DPE_cart": (0, 900),
+    # "Cross_TE": (0, 3000000),  # km, cross-track error (CARTE)
+    # "DPE_cart": (0, 3000000),  # km, CARTE DPE
+}
+
+
+# map CRPS bases to the deterministic metric to use for persistence MAE overlay
+CRPS_BASES = {"CRPS_haversine", "CRPS_vmax", "CRPS_pmin"}
+CRPS_TO_MAE = {
+    "CRPS_haversine": "DPE_GCD",  # distance → use DPE (km)
+    "CRPS_vmax": "AE_wind",  # wind → use AE_wind (kt)
+    "CRPS_pmin": "AE_pressure",  # pressure → use AE_pressure (hPa)
+}
+# Cartesian (CARTE) bases where we do NOT show baselines on the raw plots
+CARTE_BASES = {"Along_TE", "Cross_TE", "DPE_cart"}
+
+
+# collect stats
+stats = {}
+for fn in result_files:
+    label = fn.replace("_results.csv", "")
+    df = _load_eval_csv(os.path.join(EVAL_DIR, fn))
+    for base in NON_R2_BASES:
+        col = pick_metric_col(df, base)
+        if not col:
+            continue
+        g = (
+            df[["lead_hours", col]]
+            .dropna(subset=["lead_hours"])
+            .groupby("lead_hours", dropna=False)[col]
+        )
+        agg = g.agg(["mean", "count", q25, q75]).sort_index()
+        # unify column names
+        agg = agg.rename(columns={"q25": "p25", "q75": "p75"})
+        if len(agg):
+            stats.setdefault(base, {})[label] = agg
+
+# --- diagnostics: tell the user if a metric base has no data in any file
+for base in NON_R2_BASES:
+    if not stats.get(base):
+        # check which files are missing the expected column
+        missing_in = []
+        present_in = []
+        for fn in result_files:
+            df_cols = pd.read_csv(
+                os.path.join(EVAL_DIR, fn), nrows=1, low_memory=False
+            ).columns
+            if (base in df_cols) or (f"{base}_mean" in df_cols):
+                present_in.append(fn)
+            else:
+                missing_in.append(fn)
+        print(f"⚠️  No data found to plot for '{base}'.")
+        if present_in:
+            print(f"   Found in: {present_in}")
+        if missing_in:
+            print(
+                f"   Missing in: {missing_in[:6]}{' ...' if len(missing_in)>6 else ''}"
+            )
+
+# Define color map keyed by forecast label using default color cycle
+colors = cycle(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+forecast_labels = sorted({lbl for base in stats for lbl in stats[base]})
+color_map = {lbl: col for lbl, col in zip(forecast_labels, colors)}
+
 GOOGLE_KEYS = ("weatherlab_FNV3", "FNV3", "WeatherLab")
+
+
+def _is_google(lbl: str) -> bool:
+    low = lbl.lower()
+    return any(k.lower() in low for k in GOOGLE_KEYS)
+
+
+# Treat GENC specially in styling/labels (italic + dotted), but keep its own color
+def _is_genc(lbl: str) -> bool:
+    return "genc" in str(lbl).lower()
+
+
+# Detect the ANN post-processing variant to style it (dotted) consistently
+def _is_pangu_post(lbl: str) -> bool:
+    low = str(lbl).lower()
+    base = (
+        clean_label(str(lbl)).lower()
+        if "clean_label" in globals()
+        else str(lbl).lower()
+    )
+    return (
+        ("postprocessing_panguweather_ann" in low)
+        or ("postprocessing_panguweather_mlr" in low)
+        or ("postprocessing_panguweather_unet" in low)
+        or (
+            base
+            in {"pangu_post", "pangu_post_ann", "pangu_post_mlr", "pangu_post_unet"}
+        )
+    )
+
+
 CLIM_KEYS = ("climatology",)
+
+
+def _is_climatology(lbl: str) -> bool:
+    return any(k in lbl.lower() for k in CLIM_KEYS)
+
+
+def clean_label(lbl):
+    for s in ["_clean", "_corrected", "(downloaded)", "_results", "_fixed"]:
+        lbl = lbl.replace(s, "")
+    # strip leading year prefix like 2023_
+    if lbl.startswith("2023_"):
+        lbl = lbl[5:]
+    return lbl
+
+# --- Helper: Pick best available SE column for R² computation
+def _pick_se_col_for_r2(df: pd.DataFrame, variable: str) -> str | None:
+    """
+    Choose the best available SE column for R² computation for either 'wind' or 'pressure'.
+    Preference order:
+      1) SE_*_mean (probabilistic results)
+      2) SE_*       (deterministic results)
+      3) AE_*_mean  (fallback → square to get SE)
+      4) AE_*       (fallback → square to get SE)
+    Returns the column name found or None if nothing usable exists.
+    """
+    assert variable in {"wind", "pressure"}
+    base = "pressure" if variable == "pressure" else "wind"
+    se_mean = f"SE_{base}_mean"
+    se_plain = f"SE_{base}"
+    ae_mean = f"AE_{base}_mean"
+    ae_plain = f"AE_{base}"
+    cols = df.columns
+    if se_mean in cols:
+        return se_mean
+    if se_plain in cols:
+        return se_plain
+    if ae_mean in cols:
+        return ae_mean
+    if ae_plain in cols:
+        return ae_plain
+    return None
+
+
+# Pretty label for legends/plots; also rename Google's model to short form and italicize
+RENAME_SHORT = {
+    "weatherlab_FNV3": "FNV3",
+    "2023_weatherlab_FNV3": "FNV3",
+}
+def pretty_curve_label(lbl: str) -> str:
+    lowlbl = lbl.lower()
+    base = clean_label(lbl)
+    # Persistence remap: always label as "Persistence [BASE]"
+    if "persistence" in lowlbl:
+        return "Persistence [BASE]"
+    base = RENAME_SHORT.get(base, base)
+    if "postprocessing_panguweather_ann" in lowlbl or base.upper() == "PANGU_POST":
+        return "PANGU_POST_ANN"
+    if "postprocessing_panguweather_mlr" in lowlbl:
+        return "PANGU_POST_MLR"
+    if "postprocessing_panguweather_unet" in lowlbl:
+        return "PANGU_POST_UNET"
+
+    if _is_google(lbl) or base.lower() in ("fnv3",):
+        return "$\\it{FNV3}$"
+    if _is_genc(lbl) or base.lower() == "genc":
+        return "$\\it{GENC}$"
+    if _is_climatology(lbl) or base.lower() == "climatology":
+        return "MT-LB"
+    return base
+
+
+# Helper to sort legend labels so persistence is always first, then PANGU, then PANGU_POST, then others, then Google/FNV3 last
+def _legend_sort_key(lbl: str):
+    low = lbl.lower()
+    # Persistence first
+    if "persistence [base]" in low or "persistence" in low:
+        return (-1, lbl)
+    # PANGU core next
+    if low == "pangu":
+        return (0, lbl)
+    # PANGU_POST family next
+    if low in ("pangu_post", "pangu_post_ann", "pangu_post_mlr", "pangu_post_unet"):
+        return (1, lbl)
+    # Push Google's WeatherLab FNV3 last
+    if _is_google(lbl) or "fnv3" in low:
+        return (999, lbl)
+    return (2, lbl)
+
+
+# --- Global consistent color mapping (same color per model everywhere)
+_COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+_COLOR_MAP_GLOBAL: dict[str, str] = {}
+
+
+def color_for(pretty_label: str) -> str:
+    """Return a stable color for a given pretty label across figures."""
+    key = pretty_label.strip()
+    # Persistence: always black
+    if "persistence" in key.lower():
+        return "black"
+    # Force proprietary Google WeatherLab FNV3 to gray across ALL figures
+    if _is_google(key) or ("fnv3" in key.lower()) or ("weatherlab" in key.lower()):
+        return "#7a7a7a"
+    global _COLOR_CYCLE
+    if key not in _COLOR_MAP_GLOBAL:
+        try:
+            _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
+        except StopIteration:
+            _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+            _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
+    return _COLOR_MAP_GLOBAL[key]
+
+
+#
+# --- plotting
+# Baseline styles
+PERSIST_COLOR = "black"
+CLIM_COLOR = "cyan"  # distinct from persistence; dashed thick too
+
+nrows = len(PANEL_GRID)
+ncols = len(PANEL_GRID[0])
+fig, axes = plt.subplots(
+    nrows, ncols, figsize=(16, 4.1 * nrows), sharex=False, squeeze=False
+)
+
+for r, row in enumerate(PANEL_GRID):
+    for c, base in enumerate(row):
+        ax = axes[r, c]
+        if base is None:
+            ax.set_visible(False)
+            continue
+        y_max_plotted = 0.0
+
+        # Special handling for R² panels: build per-forecast series on the fly
+        if base in ("R2_pressure", "R2_wind"):
+            variable = "pressure" if base == "R2_pressure" else "wind"
+            model_handles, model_labels = [], []
+            base_handles, base_labels = [], []
+            for fn in result_files:
+                label = fn.replace("_results.csv", "")
+                df_src = _load_eval_csv(os.path.join(EVAL_DIR, fn))
+
+                # Skip RI & TIGGE_IFS only; include persistence and climatology as baselines
+                low = fn.lower()
+                if any(tok in low for tok in ("ri", "tigge_ifs")):
+                    continue
+
+                # Ensure we have the standard SE_* column expected by the R² helper,
+                # accepting probabilistic means (SE_*_mean) or falling back to AE_*(_mean)**2.
+                df_use = df_src.copy()
+                se_cand = _pick_se_col_for_r2(df_use, variable)
+                if se_cand is None:
+                    # nothing usable for this variable → skip this model
+                    continue
+                if variable == "pressure":
+                    target = "SE_pressure"
+                else:
+                    target = "SE_wind"
+                if se_cand != target:
+                    if se_cand.endswith("_mean") and se_cand.startswith("SE_"):
+                        # probabilistic: copy mean(SE) into the expected name
+                        df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce")
+                    elif se_cand.startswith("AE_"):
+                        # fallback: square AE (or AE_mean) to approximate SE
+                        df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce") ** 2
+                    else:
+                        # unexpected, but try copying numerically
+                        df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce")
+                else:
+                    # Ensure numeric dtype
+                    df_use[target] = pd.to_numeric(df_use[target], errors="coerce")
+
+                # Compute R² series using SE_* (derived from AE_* if needed) and GT from IBTrACS
+                try:
+                    r2 = _r2_from_results(
+                        df_use, ibtracs, variable=variable, year=None, debug=False
+                    )
+                except ValueError as e:
+                    print(f"[R2] Skipping {fn} ({variable}): {e}")
+                    continue
+                except Exception as e:
+                    print(f"[R2] Skipping {fn} ({variable}) due to error: {e}")
+                    continue
+                if r2.empty:
+                    print(f"[R2] No usable R² for {fn} ({variable}) — empty series.")
+                    continue
+
+                is_persist = "persistence" in label.lower()
+                is_clim = _is_climatology(label)
+                lab = pretty_curve_label(label)
+
+                if is_persist:
+                    style = dict(
+                        linestyle="--",
+                        color=PERSIST_COLOR,
+                        linewidth=3.0,
+                        markersize=3,
+                        label="Persistence",
+                    )
+                elif is_clim:
+                    style = dict(
+                        linestyle="--",
+                        color=CLIM_COLOR,
+                        linewidth=3.0,
+                        markersize=3,
+                        label="MT-LB",
+                    )
+                else:
+                    style = dict(
+                        linestyle="-",
+                        marker="o",
+                        linewidth=1.5,
+                        markersize=3,
+                        color=color_for(lab),
+                        label=lab,
+                    )
+                    if _is_google(label):
+                        # FNV3: force gray color; now use dotted to match special treatment
+                        style.update(
+                            dict(
+                                color="#7a7a7a",
+                                linestyle=":",
+                                marker="s",
+                                linewidth=2.0,
+                            )
+                        )
+                    elif _is_genc(label) or _is_pangu_post(label):
+                        # GENC and PANGU_POST: dotted line, keep their colors
+                        style.update(dict(linestyle=":", marker="s", linewidth=2.0))
+
+                (h,) = ax.plot(r2.index.values.astype(float), r2.values, **style)
+
+                if is_persist:
+                    base_handles.append(h)
+                    base_labels.append("Persistence")
+                elif is_clim:
+                    base_handles.append(h)
+                    base_labels.append("MT-LB")
+                else:
+                    model_handles.append(h)
+                    model_labels.append(lab)
+                try:
+                    y_max_plotted = max(y_max_plotted, float(np.nanmax(r2.values)))
+                except Exception:
+                    pass
+
+            # Axes formatting
+            short_title = SHORT_TITLE.get(base, base)
+            ax.set_title(short_title)
+            ax.set_xlabel("Lead time (hours)")
+            ax.set_ylabel("")
+            ax.set_xlim(6, 120)
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
+            ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
+            ax.grid(True, which="major", alpha=0.35)
+            ax.grid(True, which="minor", alpha=0.12)
+            # Zero-skill reference line and fixed, publication-friendly range
+            ax.axhline(0.0, color="k", linewidth=0.8, alpha=0.6)
+            ax.set_ylim(-0.7, 1.0)
+
+            # Legends: models and baselines
+            leg_models = None
+            if model_handles:
+                pairs = list(zip(model_handles, model_labels))
+                pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
+                h_sorted, l_sorted = zip(*pairs)
+                leg_models = ax.legend(
+                    h_sorted, l_sorted, fontsize=11, loc="upper left", frameon=False, ncols=2
+                )
+            if base_handles:
+                leg_base = ax.legend(
+                    base_handles,
+                    base_labels,
+                    fontsize=11,
+                    loc="lower right",
+                    frameon=False,
+                    title="Baselines",
+                )
+                if leg_models is not None:
+                    ax.add_artist(leg_models)
+            elif leg_models is None:
+                ax.legend(fontsize=11, loc="upper left", frameon=False)
+
+            # Done with R² panel
+            continue
+
+        # --- Default panels (existing behaviour)
+        per_forecast = stats.get(base, {})
+        if not per_forecast:
+            ax.set_visible(False)
+            continue
+
+        ax2 = ax.twinx() if SHOW_COUNTS else None
+
+        # Prepare containers to build two legends: models vs baselines
+        model_handles, model_labels = [], []
+        base_handles, base_labels = [], []
+
+        for forecast_label, agg in per_forecast.items():
+            x = agg.index.values.astype(float)
+            y = agg["mean"].values
+
+            is_persist = "persistence" in forecast_label.lower()
+            is_clim = _is_climatology(forecast_label)
+
+            # Skip baselines for CARTE panels
+            if base in CARTE_BASES and (is_persist or is_clim):
+                continue
+
+            # Label text
+            if is_persist:
+                label_txt = "Persistence"
+            elif is_clim:
+                label_txt = "MT-LB"
+            else:
+                label_txt = pretty_curve_label(forecast_label)
+
+            # Skip persistence on CRPS panels (we overlay MAE instead), but DO show climatology
+            if base in CRPS_BASES and is_persist:
+                continue
+
+            # Build style
+            if is_persist:
+                plot_kwargs = dict(
+                    linestyle="--",
+                    color=PERSIST_COLOR,
+                    linewidth=3.0,
+                    markersize=3,
+                    zorder=10,
+                    label=label_txt,
+                )
+            elif is_clim:
+                plot_kwargs = dict(
+                    linestyle="--",
+                    color=CLIM_COLOR,
+                    linewidth=3.0,
+                    markersize=3,
+                    zorder=9,
+                    label=label_txt,
+                )
+            else:
+                plot_kwargs = dict(
+                    linestyle="-",
+                    marker="o",
+                    linewidth=1.5,
+                    markersize=3,
+                    label=label_txt,
+                    color=color_for(label_txt),
+                )
+                # special styling for Google WeatherLab FNV3 (proprietary)
+                if _is_google(forecast_label):
+                    # FNV3: force gray + dotted
+                    plot_kwargs.update(
+                        dict(color="#7a7a7a", linestyle=":", marker="s", linewidth=2.0)
+                    )
+                elif _is_genc(forecast_label) or _is_pangu_post(forecast_label):
+                    # GENC and PANGU_POST: dotted, keep color
+                    plot_kwargs.update(dict(linestyle=":", marker="s", linewidth=2.0))
+
+            (h,) = ax.plot(x, y, **plot_kwargs)
+            try:
+                y_max_plotted = max(y_max_plotted, float(np.nanmax(y)))
+            except Exception:
+                pass
+            if is_persist or is_clim:
+                base_handles.append(h)
+                base_labels.append(label_txt)
+            else:
+                model_handles.append(h)
+                model_labels.append(label_txt)
+
+            # plot sample size on right axis (same color, dashed)
+            if SHOW_COUNTS and ax2 is not None:
+                if is_persist:
+                    linecolor = PERSIST_COLOR
+                elif is_clim:
+                    linecolor = CLIM_COLOR
+                else:
+                    linecolor = color_map.get(forecast_label, None)
+                ax2.plot(
+                    x,
+                    agg["count"].values,
+                    linestyle="--",
+                    linewidth=1.0,
+                    alpha=0.6,
+                    color=linecolor,
+                    label=f"{clean_label(forecast_label)} (n)",
+                )
+
+        # If this is a CRPS panel, overlay persistence MAE (from persistence_results.csv)
+        if base in CRPS_BASES and _persist_raw is not None:
+            mae_base = CRPS_TO_MAE.get(base)
+            if mae_base is not None:
+                # pick the right column from persistence file (prefer *_mean if present)
+                mae_col = (
+                    f"{mae_base}_mean"
+                    if f"{mae_base}_mean" in _persist_raw.columns
+                    else (mae_base if mae_base in _persist_raw.columns else None)
+                )
+                if mae_col is not None and "lead_hours" in _persist_raw.columns:
+                    g_mae = (
+                        _persist_raw[["lead_hours", mae_col]]
+                        .dropna(subset=["lead_hours"])
+                        .groupby("lead_hours")[mae_col]
+                    )
+                    agg_mae = g_mae.mean().sort_index()
+                    if len(agg_mae):
+                        (h_mae,) = ax.plot(
+                            agg_mae.index.values.astype(float),
+                            agg_mae.values,
+                            linestyle="--",
+                            color="black",
+                            linewidth=3,
+                            label="Persistence (MAE)",
+                            zorder=9,
+                        )
+                        try:
+                            y_max_plotted = max(
+                                y_max_plotted, float(np.nanmax(agg_mae.values))
+                            )
+                        except Exception:
+                            pass
+                        # ensure it appears under the Baselines legend group
+                        base_handles.append(h_mae)
+                        base_labels.append("Persistence (MAE)")
+
+        # Climatology baseline y_max update
+        # Find the h_clim plot and update y_max_plotted if present
+        if os.path.exists(CLIM_FILE):
+            try:
+                _clim_df = pd.read_csv(CLIM_FILE, low_memory=False)
+                for cdt in ("Initial Time", "Valid Time"):
+                    if cdt in _clim_df.columns:
+                        _clim_df[cdt] = pd.to_datetime(_clim_df[cdt], errors="coerce")
+                _clim_df["lead_hours"] = (
+                    _clim_df["Valid Time"] - _clim_df["Initial Time"]
+                ).dt.total_seconds() / 3600.0
+                clim_col = pick_metric_col(_clim_df, base)
+                if clim_col is not None:
+                    c_agg = (
+                        _clim_df[["lead_hours", clim_col]]
+                        .dropna()
+                        .groupby("lead_hours")[clim_col]
+                        .mean()
+                        .sort_index()
+                    )
+                    if len(c_agg):
+                        try:
+                            y_max_plotted = max(
+                                y_max_plotted, float(np.nanmax(c_agg.values))
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        short_title = SHORT_TITLE.get(base, base)
+        ax.set_title(short_title)
+        ax.set_xlabel("Lead time (hours)")
+        ax.set_ylabel("")
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(6, 120)
+        ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
+        ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
+        ax.grid(True, which="major", alpha=0.35)
+        ax.grid(True, which="minor", alpha=0.12)
+        if base in YLIMS:
+            ax.set_ylim(*YLIMS[base])
+        else:
+            # Dynamic headroom if no explicit cap provided (e.g., CRPS_haversine)
+            if y_max_plotted > 0:
+                ax.set_ylim(0, y_max_plotted * 1.10)
+
+        # Right axis formatting for counts
+        if SHOW_COUNTS and ax2 is not None:
+            ax2.set_ylabel("Sample size (cases)")
+            ax2.grid(False)
+
+        # Legends: separate models and baselines (with a category title)
+        if SHOW_COUNTS and ax2 is not None:
+            # If counts are shown, merge their handles into the model legend
+            h2, l2 = ax2.get_legend_handles_labels()
+            model_handles_all = model_handles + h2
+            model_labels_all = model_labels + l2
+        else:
+            model_handles_all = model_handles
+            model_labels_all = model_labels
+
+        # Primary legend: models
+        if model_handles_all:
+            # sort so PANGU then PANGU_POST are adjacent and at the top
+            pairs = list(zip(model_handles_all, model_labels_all))
+            pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
+            model_handles_sorted, model_labels_sorted = zip(*pairs)
+            ncols_ = 2 if base == "AE_wind" else 1
+            leg_models = ax.legend(
+                model_handles_sorted,
+                model_labels_sorted,
+                fontsize=11,
+                loc="upper left",
+                frameon=False,
+                ncols=ncols_,
+            )
+        else:
+            leg_models = None
+        # Baselines legend with a title
+        if base_handles:
+            if base in ("DPE_GCD", "CRPS_haversine"):
+                leg_base = ax.legend(
+                    base_handles,
+                    base_labels,
+                    fontsize=11,
+                    loc="lower right",
+                    bbox_to_anchor=(1.0, 0.10),  # raise slightly while staying in-axes
+                    frameon=False,
+                    title="Baselines",
+                )
+            else:
+                leg_base = ax.legend(
+                    base_handles,
+                    base_labels,
+                    fontsize=11,
+                    loc="lower right",
+                    frameon=False,
+                    title="Baselines",
+                )
+            if leg_models is not None:
+                ax.add_artist(leg_models)
+        elif leg_models is None:
+            # Fallback single legend if nothing else
+            ax.legend(fontsize=11, loc="upper left", frameon=False)
+
+TEST_YEAR = 2023
+fig.suptitle(
+    f"RAW (non-filled) comparison — error vs lead (test year {TEST_YEAR}). Models on native coverage; R² uses IBTrACS.",
+    fontsize=14,
+    y=0.995,
+)
+
+
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+fig.savefig("TCBench_raw_comparison.pdf", format="pdf", bbox_inches="tight")
+plt.show()
+
+#
+# ---- Shared helpers for FAIR/CLIM-FAIR coverage (IBTrACS-denominator & raw-model coverage)
+
+IBTRACS_DIR = os.path.join(os.curdir, "data", "ibtracs")
+IBTRACS_2023_CSV = os.path.join(IBTRACS_DIR, "IBTrACS_2023.csv")
+
+
 EXPLICIT_LEADS = (
     6,
     12,
@@ -171,71 +893,20 @@ EXPLICIT_LEADS = (
     120,
 )
 
+#
+# Leads where post-processing models have values; other models use the full 6h grid
+PP_FILL_LEADS = (6, 12, 18, 24, 48, 72, 96, 120)
+FULL_FILL_LEADS = EXPLICIT_LEADS
 
-# --- Active tracks per lead (unique SIDs with a valid pair for each lead)
-def _ibtracs_active_tracks_by_lead(
-    ib_df: pd.DataFrame, leads=EXPLICIT_LEADS
-) -> pd.Series:
-    """Return # of *unique SIDs* that are still active at each lead.
-    A SID is 'active' at lead L if it has at least one pair of hourly records
-    (t0, t0+L) within the same storm in IBTrACS 2023.
-    """
-    if ib_df is None or ib_df.empty:
-        return pd.Series(dtype=float)
-    if "ISO_TIME" not in ib_df.columns or "SID" not in ib_df.columns:
-        return pd.Series(dtype=float)
+# Only count initializations at synoptic hours 00Z and 12Z
+INIT_HOURS = (0, 12)
 
-    df = ib_df.copy()
-    dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
-    if hasattr(dt.dt, "tz_localize"):
-        try:
-            dt = dt.dt.tz_localize(None)
-        except Exception:
-            pass
-    dt = dt.dt.floor("h")
-    df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
+# Coverage denominator mode: "ibtracs" = fixed IBTrACS verification-pair counts (same for all models)
+# or "aligned" = IBTrACS pairs only for (SID, t0) that appear in a given model file
 
-    active_counts: dict[float, int] = {}
-    lead_list = [int(l) for l in leads]
-
-    for sid, grp in df.groupby("SID", sort=False):
-        h = grp["ISO_TIME"].drop_duplicates().sort_values()
-        # all 6-hourly timestamps available for this SID
-        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
-        h_int_all = h_int_all[h_int_all % 6 == 0]
-        if len(h_int_all) == 0:
-            continue
-        hset = set(h_int_all.tolist())
-        # t0 candidates restricted to 00Z/12Z, vt may be any 6-hour step
-        if "INIT_HOURS" in globals() and INIT_HOURS:
-            t0_candidates = [t for t in h_int_all if (t % 24) in INIT_HOURS]
-        else:
-            t0_candidates = list(h_int_all)
-        if not t0_candidates:
-            continue
-        for lh in lead_list:
-            # 'alive' if there exists t0 such that (t0 + lh) is observed within the same SID
-            if any((t0 + lh) in hset for t0 in t0_candidates):
-                active_counts[float(lh)] = active_counts.get(float(lh), 0) + 1
-
-    return pd.Series(active_counts, dtype=float).sort_index()
-
-
-ibtracs = toolbox.read_hist_track_file(tracks_path=args.ibtracs_path)
-
-ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023]
-# Cache once for reuse in figures
-ACTIVE_TRACKS_2023 = _ibtracs_active_tracks_by_lead(ibtracs, EXPLICIT_LEADS)
-# Precompute IBTrACS verification-pair counts (keys) by lead
-
-
-# helpers for naming quantile aggregations
-def q25(s):
-    return s.quantile(0.25)
-
-
-def q75(s):
-    return s.quantile(0.75)
+COVERAGE_DENOM = "ibtracs"  # choose: "ibtracs" or "aligned"
+# Print per-model coverage diagnostics while plotting coverage
+VERBOSE_COVERAGE = False
 
 
 def _build_ib_denom_from_df(ib_df: pd.DataFrame, leads=EXPLICIT_LEADS) -> pd.Series:
@@ -308,9 +979,6 @@ def _build_ib_denominator_counts_unified(
     return s
 
 
-IB_KEYS_2023 = _build_ib_denominator_counts_unified(leads=EXPLICIT_LEADS, ib_df=ibtracs)
-
-
 # --- IBTrACS denominator aligned to a model's initializations
 def _aligned_ib_denominator_for_model(
     model_df: pd.DataFrame, ib_df: pd.DataFrame, leads=EXPLICIT_LEADS
@@ -380,7 +1048,60 @@ def _aligned_ib_denominator_for_model(
     return pd.Series(counts, dtype=float).sort_index()
 
 
-# print("[DEBUG][IB_DENOM] leads present:", list(IB_KEYS_2023.index.astype(int)))
+# --- Active tracks per lead (unique SIDs with a valid pair for each lead)
+def _ibtracs_active_tracks_by_lead(
+    ib_df: pd.DataFrame, leads=EXPLICIT_LEADS
+) -> pd.Series:
+    """Return # of *unique SIDs* that are still active at each lead.
+    A SID is 'active' at lead L if it has at least one pair of hourly records
+    (t0, t0+L) within the same storm in IBTrACS 2023.
+    """
+    if ib_df is None or ib_df.empty:
+        return pd.Series(dtype=float)
+    if "ISO_TIME" not in ib_df.columns or "SID" not in ib_df.columns:
+        return pd.Series(dtype=float)
+
+    df = ib_df.copy()
+    dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
+    if hasattr(dt.dt, "tz_localize"):
+        try:
+            dt = dt.dt.tz_localize(None)
+        except Exception:
+            pass
+    dt = dt.dt.floor("h")
+    df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
+
+    active_counts: dict[float, int] = {}
+    lead_list = [int(l) for l in leads]
+
+    for sid, grp in df.groupby("SID", sort=False):
+        h = grp["ISO_TIME"].drop_duplicates().sort_values()
+        # all 6-hourly timestamps available for this SID
+        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
+        h_int_all = h_int_all[h_int_all % 6 == 0]
+        if len(h_int_all) == 0:
+            continue
+        hset = set(h_int_all.tolist())
+        # t0 candidates restricted to 00Z/12Z, vt may be any 6-hour step
+        if "INIT_HOURS" in globals() and INIT_HOURS:
+            t0_candidates = [t for t in h_int_all if (t % 24) in INIT_HOURS]
+        else:
+            t0_candidates = list(h_int_all)
+        if not t0_candidates:
+            continue
+        for lh in lead_list:
+            # 'alive' if there exists t0 such that (t0 + lh) is observed within the same SID
+            if any((t0 + lh) in hset for t0 in t0_candidates):
+                active_counts[float(lh)] = active_counts.get(float(lh), 0) + 1
+
+    return pd.Series(active_counts, dtype=float).sort_index()
+
+
+# Cache once for reuse in figures
+ACTIVE_TRACKS_2023 = _ibtracs_active_tracks_by_lead(ibtracs, EXPLICIT_LEADS)
+# Precompute IBTrACS verification-pair counts (keys) by lead
+IB_KEYS_2023 = _build_ib_denominator_counts_unified(leads=EXPLICIT_LEADS, ib_df=ibtracs)
+print("[DEBUG][IB_DENOM] leads present:", list(IB_KEYS_2023.index.astype(int)))
 
 
 def _coverage_series_vs_ib_from_raw(
@@ -423,933 +1144,6 @@ def _coverage_series_vs_ib_from_raw(
     return pd.Series(cov_vals, dtype=float).sort_index()
 
 
-def _is_google(lbl: str) -> bool:
-    low = str(lbl).lower()
-    return any(k.lower() in low for k in GOOGLE_KEYS)
-
-
-def _is_genc(lbl: str) -> bool:
-    return "genc" in str(lbl).lower()
-
-
-def clean_label(lbl: str) -> str:
-    s = str(lbl)
-    for tok in ["_clean", "_corrected", "(downloaded)", "_results", "_fixed"]:
-        s = s.replace(tok, "")
-    if s.startswith("2023_"):
-        s = s[5:]
-    return s
-
-
-def _is_pangu_post(lbl: str) -> bool:
-    low = str(lbl).lower()
-    base = clean_label(str(lbl)).lower()
-    return (
-        ("postprocessing_panguweather_ann" in low)
-        or ("postprocessing_panguweather_mlr" in low)
-        or ("postprocessing_panguweather_unet" in low)
-        or (
-            base
-            in {"pangu_post", "pangu_post_ann", "pangu_post_mlr", "pangu_post_unet"}
-        )
-    )
-
-
-def _is_climatology(lbl: str) -> bool:
-    return any(k in str(lbl).lower() for k in CLIM_KEYS)
-
-
-RENAME_SHORT = {
-    "weatherlab_FNV3": "FNV3",
-    "2023_weatherlab_FNV3": "FNV3",
-}
-
-
-def pretty_curve_label(lbl: str) -> str:
-    base = clean_label(str(lbl))
-    low = str(lbl).lower()
-    base = RENAME_SHORT.get(base, base)
-    if "postprocessing_panguweather_ann" in low or base.upper() == "PANGU_POST":
-        return "PANGU_POST_ANN"
-    if "postprocessing_panguweather_mlr" in low:
-        return "PANGU_POST_MLR"
-    if "postprocessing_panguweather_unet" in low:
-        return "PANGU_POST_UNET"
-    if _is_google(lbl) or base.lower() == "fnv3":
-        return "$\\it{FNV3}$"
-    if _is_genc(lbl) or base.lower() == "genc":
-        return "$\\it{GENC}$"
-    if _is_climatology(lbl) or base.lower() == "climatology":
-        return "Mean Tendency by Lead & Basin (MT-LB)"
-    return base
-
-
-# Global consistent color mapping across figures
-_COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
-_COLOR_MAP_GLOBAL: dict[str, str] = {}
-
-
-def color_for(pretty_label: str) -> str:
-    key = str(pretty_label).strip()
-    # Force proprietary Google WeatherLab FNV3 to gray across ALL figures
-    if _is_google(key) or ("fnv3" in key.lower()) or ("weatherlab" in key.lower()):
-        return "#7a7a7a"
-    global _COLOR_CYCLE
-    if key not in _COLOR_MAP_GLOBAL:
-        try:
-            _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
-        except StopIteration:
-            _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
-            _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
-    return _COLOR_MAP_GLOBAL[key]
-
-
-# Legend ordering helper used in multiple figures
-def _legend_sort_key(lbl: str):
-    low = str(lbl).lower()
-    if low == "pangu":
-        return (0, lbl)
-    if low.startswith("pangu_post") or low == "pangu_post":
-        return (1, lbl)
-    if _is_google(lbl) or ("fnv3" in low):
-        return (999, lbl)
-    return (2, lbl)
-
-
-# Map CRPS metrics to the deterministic MAE proxy used for persistence overlays
-CRPS_TO_MAE = {
-    "CRPS_haversine": "DPE_GCD",
-    "CRPS_vmax": "AE_wind",
-    "CRPS_pmin": "AE_pressure",
-}
-
-# Baseline colors (shared)
-PERSIST_COLOR = "black"
-CLIM_COLOR = "cyan"
-
-
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
-# Global path for climatology results (used by RAW, FAIR and scorecards)
-CLIM_FILE = os.path.join(EVAL_DIR, "2023_climatology_results.csv")
-
-
-# Optional: load persistence raw results to derive MAE lines on CRPS panels
-PERSIST_PATH = os.path.join(EVAL_DIR, "persistence_results.csv")
-_persist_raw = None
-if os.path.exists(PERSIST_PATH):
-    try:
-        _persist_raw = pd.read_csv(PERSIST_PATH, low_memory=False)
-        for c in ("Initial Time", "Valid Time"):
-            if c in _persist_raw.columns:
-                _persist_raw[c] = pd.to_datetime(_persist_raw[c], errors="coerce")
-        if {"Initial Time", "Valid Time"}.issubset(_persist_raw.columns):
-            _persist_raw["lead_hours"] = (
-                _persist_raw["Valid Time"] - _persist_raw["Initial Time"]
-            ).dt.total_seconds() / 3600.0
-    except Exception as _e:
-        print(f"⚠️ Could not load persistence_results.csv for MAE overlay: {_e}")
-
-# ---- IBTrACS 2023 (ground-truth key set for coverage) — STRICT (no fallbacks) ----
-if toolbox is None:
-    raise RuntimeError(
-        "IBTrACS toolbox is required but not available: cannot compute coverage without IBTrACS."
-    )
-try:
-    ibtracs = toolbox.read_hist_track_file(
-        tracks_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-    )
-    ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023].copy()
-    if ibtracs.empty:
-        raise RuntimeError("Loaded IBTrACS (2023) is empty.")
-except Exception as _e:
-    raise RuntimeError(f"Failed to load IBTrACS for coverage denominator: {_e}")
-
-
-# ---- Shared helpers for FAIR/CLIM-FAIR coverage (IBTrACS-denominator & raw-model coverage)
-
-IBTRACS_DIR = (
-    "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs"
-)
-IBTRACS_2023_CSV = os.path.join(IBTRACS_DIR, "IBTrACS_2023.csv")
-
-
-#
-# Leads where post-processing models have values; other models use the full 6h grid
-PP_FILL_LEADS = (6, 12, 18, 24, 48, 72, 96, 120)
-FULL_FILL_LEADS = EXPLICIT_LEADS
-
-# Only count initializations at synoptic hours 00Z and 12Z
-INIT_HOURS = (0, 12)
-
-# Coverage denominator mode: "ibtracs" = fixed IBTrACS verification-pair counts (same for all models)
-# or "aligned" = IBTrACS pairs only for (SID, t0) that appear in a given model file
-
-COVERAGE_DENOM = "ibtracs"  # choose: "ibtracs" or "aligned"
-# Print per-model coverage diagnostics while plotting coverage
-VERBOSE_COVERAGE = True
-
-
-def plot_raw_comparison(
-    save: bool = False, save_path: str = "TCBench_raw_comparison.pdf", show: bool = True
-) -> plt.Figure:
-    """Plot the RAW comparison grid (3x3) and optionally save/show.
-    Uses module-level settings (EVAL_DIR, ibtracs, _persist_raw, styles).
-    Returns the created Figure.
-    """
-    # --- collect result files but blacklist unwanted ones
-    result_files = sorted(
-        [
-            f
-            for f in os.listdir(EVAL_DIR)
-            if ("RI" not in f) and (f.endswith("_results.csv") or ("baseline" in f))
-        ]
-    )
-
-    # keep only the ANN post-processing variant among postprocessing_* files
-    _PP_KEEP = "postprocessing_panguweather_ann"
-    result_files = [
-        f
-        for f in result_files
-        if ("postprocessing" not in f.lower()) or (_PP_KEEP in f.lower())
-    ]
-
-    # Ensure climatology baseline is included if present
-    CLIM_FILE = os.path.join(EVAL_DIR, "2023_climatology_results.csv")
-    if os.path.exists(CLIM_FILE):
-        clim_name = os.path.basename(CLIM_FILE)
-        if clim_name not in result_files:
-            result_files.append(clim_name)
-
-    blacklist_substr = [
-        "Gencast",  # keep filtering Gencast
-        "TIGGE_IFS",  # drop any IFS variant (results, corrected, clean)
-    ]
-    result_files = [
-        f for f in result_files if not any(b in f for b in blacklist_substr)
-    ]
-    if not result_files:
-        raise FileNotFoundError(
-            "No *_results.csv files found in EVAL_DIR after filtering."
-        )
-
-    # --- consolidate duplicates that map to the same logical forecast (e.g., GEFS vs GEFS_clean)
-    # define a base key (label) by stripping common suffixes
-    strip_tokens = ["_clean", "_corrected", "(downloaded)", "_results"]
-
-    def base_key(fname: str) -> str:
-        key = fname.replace("_results.csv", "")
-        for t in strip_tokens:
-            key = key.replace(t, "")
-        return key
-
-    # variant ranking: prefer clean > corrected > base
-    variant_rank = {"_clean": 3, "_corrected": 2}
-
-    def rank_of(fname: str) -> int:
-        for tok, r in variant_rank.items():
-            if tok in fname:
-                return r
-        return 1  # base
-
-    best = {}
-    for f in result_files:
-        k = base_key(f)
-        r = rank_of(f)
-        if (k not in best) or (r > best[k][0]):
-            best[k] = (r, f)
-
-    # keep only the chosen representative files
-    result_files = [v[1] for v in best.values()]
-    result_files.sort()
-
-    SHOW_COUNTS = False  # plot sample size per lead on a right-hand y-axis
-
-    # === Panel grid (3 rows x 4 cols) ===
-    # Row 1: Track metrics (4 panels)
-    # Row 2: Pressure: AE, R², CRPS, (empty)
-    # Row 3: Wind:     AE, R², CRPS, (empty)
-    PANEL_GRID = [
-        ["DPE_GCD", "CRPS_haversine", "Along_TE"],
-        ["AE_pressure", "R2_pressure", "CRPS_pmin"],
-        ["AE_wind", "R2_wind", "CRPS_vmax"],
-    ]
-
-    # Helpers
-    ALL_BASES = [b for row in PANEL_GRID for b in row if b is not None]
-    NON_R2_BASES = [b for b in ALL_BASES if not str(b).startswith("R2_")]
-
-    NICE_NAME = {
-        # TRACK position metrics
-        "DPE_GCD": "Track — direct position error (DPE)",
-        "CRPS_haversine": "Track — CRPS (track displacement)",
-        # TRACK geometry (CARTE)
-        "Along_TE": "Track — along-track error (CARTE)",
-        "Cross_TE": "Track — cross-track error (CARTE)",
-        "DPE_cart": "Track — direct position error (CARTE)",
-        # INTENSITY metrics
-        "AE_wind": "Intensity — abs. error (max wind)",
-        "SE_wind": "Intensity — squared error (max wind)",
-        "CRPS_vmax": "Intensity — CRPS (max wind)",
-        "AE_pressure": "Intensity — abs. error (min pressure)",
-        "SE_pressure": "Intensity — squared error (min pressure)",
-        "CRPS_pmin": "Intensity — CRPS (min pressure)",
-    }
-
-    UNITS = {
-        "DPE_GCD": "km",
-        "CRPS_haversine": "km",
-        "AE_wind": "kt",
-        "SE_wind": "kt²",
-        "CRPS_vmax": "kt",
-        "AE_pressure": "hPa",
-        "SE_pressure": "hPa²",
-        "CRPS_pmin": "hPa",
-        "Along_TE": "km",
-        "Cross_TE": "km",
-        "DPE_cart": "km",
-    }
-
-    # --- Add R² (unitless) entries
-    NICE_NAME.update(
-        {
-            "R2_pressure": "Intensity — Coefficient of Determination (Pressure)",
-            "R2_wind": "Intensity — Coefficient of Determination (Wind)",
-        }
-    )
-    UNITS.update(
-        {
-            "R2_pressure": "",  # unitless
-            "R2_wind": "",  # unitless
-        }
-    )
-
-    # --- Short title map for panels
-    SHORT_TITLE = {
-        "DPE_GCD": "DPE — track",
-        "CRPS_haversine": "CRPS — track",
-        "Along_TE": "Along‑track error",
-        "Cross_TE": "Cross‑track error",
-        "AE_pressure": "AE — pressure",
-        "CRPS_pmin": "CRPS — pressure",
-        "AE_wind": "AE — wind",
-        "CRPS_vmax": "CRPS — wind",
-        "R2_pressure": "R² — pressure",
-        "R2_wind": "R² — wind",
-    }
-
-    YLIMS = {
-        "DPE_GCD": (0, 2000),
-        "Cross_TE": (0, 900),
-        "DPE_cart": (0, 900),
-        # "Cross_TE": (0, 3000000),  # km, cross-track error (CARTE)
-        # "DPE_cart": (0, 3000000),  # km, CARTE DPE
-    }
-
-    # map CRPS bases to the deterministic metric to use for persistence MAE overlay
-    CRPS_BASES = {"CRPS_haversine", "CRPS_vmax", "CRPS_pmin"}
-    CRPS_TO_MAE = {
-        "CRPS_haversine": "DPE_GCD",  # distance → use DPE (km)
-        "CRPS_vmax": "AE_wind",  # wind → use AE_wind (kt)
-        "CRPS_pmin": "AE_pressure",  # pressure → use AE_pressure (hPa)
-    }
-    # Cartesian (CARTE) bases where we do NOT show baselines on the raw plots
-    CARTE_BASES = {"Along_TE", "Cross_TE", "DPE_cart"}
-
-    # collect stats
-    stats = {}
-    for fn in result_files:
-        label = fn.replace("_results.csv", "")
-        df = _load_eval_csv(os.path.join(EVAL_DIR, fn))
-        for base in NON_R2_BASES:
-            col = _pick_metric_col(df, base)
-            if not col:
-                continue
-            g = (
-                df[["lead_hours", col]]
-                .dropna(subset=["lead_hours"])
-                .groupby("lead_hours", dropna=False)[col]
-            )
-            agg = g.agg(["mean", "count", q25, q75]).sort_index()
-            # unify column names
-            agg = agg.rename(columns={"q25": "p25", "q75": "p75"})
-            if len(agg):
-                stats.setdefault(base, {})[label] = agg
-
-    # --- diagnostics: tell the user if a metric base has no data in any file
-    for base in NON_R2_BASES:
-        if not stats.get(base):
-            # check which files are missing the expected column
-            missing_in = []
-            present_in = []
-            for fn in result_files:
-                df_cols = pd.read_csv(
-                    os.path.join(EVAL_DIR, fn), nrows=1, low_memory=False
-                ).columns
-                if (base in df_cols) or (f"{base}_mean" in df_cols):
-                    present_in.append(fn)
-                else:
-                    missing_in.append(fn)
-            print(f"⚠️  No data found to plot for '{base}'.")
-            if present_in:
-                print(f"   Found in: {present_in}")
-            if missing_in:
-                print(
-                    f"   Missing in: {missing_in[:6]}{' ...' if len(missing_in)>6 else ''}"
-                )
-
-    # Define color map keyed by forecast label using default color cycle
-    colors = cycle(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
-    forecast_labels = sorted({lbl for base in stats for lbl in stats[base]})
-    color_map = {lbl: col for lbl, col in zip(forecast_labels, colors)}
-
-    def _is_google(lbl: str) -> bool:
-        low = lbl.lower()
-        return any(k.lower() in low for k in GOOGLE_KEYS)
-
-    # Treat GENC specially in styling/labels (italic + dotted), but keep its own color
-    def _is_genc(lbl: str) -> bool:
-        return "genc" in str(lbl).lower()
-
-    # Detect the ANN post-processing variant to style it (dotted) consistently
-    def _is_pangu_post(lbl: str) -> bool:
-        low = str(lbl).lower()
-        base = (
-            clean_label(str(lbl)).lower()
-            if "clean_label" in globals()
-            else str(lbl).lower()
-        )
-        return (
-            ("postprocessing_panguweather_ann" in low)
-            or ("postprocessing_panguweather_mlr" in low)
-            or ("postprocessing_panguweather_unet" in low)
-            or (
-                base
-                in {"pangu_post", "pangu_post_ann", "pangu_post_mlr", "pangu_post_unet"}
-            )
-        )
-
-    CLIM_KEYS = ("climatology",)
-
-    def _is_climatology(lbl: str) -> bool:
-        return any(k in lbl.lower() for k in CLIM_KEYS)
-
-    def clean_label(lbl):
-        for s in ["_clean", "_corrected", "(downloaded)", "_results", "_fixed"]:
-            lbl = lbl.replace(s, "")
-        # strip leading year prefix like 2023_
-        if lbl.startswith("2023_"):
-            lbl = lbl[5:]
-        return lbl
-
-    # Pretty label for legends/plots; also rename Google's model to short form and italicize
-    RENAME_SHORT = {
-        "weatherlab_FNV3": "FNV3",
-        "2023_weatherlab_FNV3": "FNV3",
-    }
-
-    def pretty_curve_label(lbl: str) -> str:
-        lowlbl = lbl.lower()
-        base = clean_label(lbl)
-        base = RENAME_SHORT.get(base, base)
-        if "postprocessing_panguweather_ann" in lowlbl or base.upper() == "PANGU_POST":
-            return "PANGU_POST_ANN"
-        if "postprocessing_panguweather_mlr" in lowlbl:
-            return "PANGU_POST_MLR"
-        if "postprocessing_panguweather_unet" in lowlbl:
-            return "PANGU_POST_UNET"
-
-        if _is_google(lbl) or base.lower() in ("fnv3",):
-            return "$\\it{FNV3}$"
-        if _is_genc(lbl) or base.lower() == "genc":
-            return "$\\it{GENC}$"
-        if _is_climatology(lbl) or base.lower() == "climatology":
-            return "Mean Tendency by Lead & Basin (MT-LB)"
-        return base
-
-    # Helper to sort legend labels so PANGU then PANGU_POST
-    def _legend_sort_key(lbl: str):
-        low = lbl.lower()
-        if low == "pangu":
-            return (0, lbl)
-        if low == "pangu_post":
-            return (1, lbl)
-        # Push Google's WeatherLab FNV3 to the bottom of legends
-        if _is_google(lbl) or "fnv3" in low:
-            return (999, lbl)
-        return (2, lbl)
-
-    # --- Global consistent color mapping (same color per model everywhere)
-    _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
-    _COLOR_MAP_GLOBAL: dict[str, str] = {}
-
-    def color_for(pretty_label: str) -> str:
-        """Return a stable color for a given pretty label across figures."""
-        key = pretty_label.strip()
-        # Force proprietary Google WeatherLab FNV3 to gray across ALL figures
-        if _is_google(key) or ("fnv3" in key.lower()) or ("weatherlab" in key.lower()):
-            return "#7a7a7a"
-        global _COLOR_CYCLE
-        if key not in _COLOR_MAP_GLOBAL:
-            try:
-                _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
-            except StopIteration:
-                _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
-                _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
-        return _COLOR_MAP_GLOBAL[key]
-
-    #
-    # --- plotting
-    # Baseline styles
-    PERSIST_COLOR = "black"
-    CLIM_COLOR = "cyan"  # distinct from persistence; dashed thick too
-
-    nrows = len(PANEL_GRID)
-    ncols = len(PANEL_GRID[0])
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(16, 4.1 * nrows), sharex=False, squeeze=False
-    )
-
-    for r, row in enumerate(PANEL_GRID):
-        for c, base in enumerate(row):
-            ax = axes[r, c]
-            if base is None:
-                ax.set_visible(False)
-                continue
-            y_max_plotted = 0.0
-
-            # Special handling for R² panels: build per-forecast series on the fly
-            if base in ("R2_pressure", "R2_wind"):
-                variable = "pressure" if base == "R2_pressure" else "wind"
-                model_handles, model_labels = [], []
-                base_handles, base_labels = [], []
-                for fn in result_files:
-                    label = fn.replace("_results.csv", "")
-                    df_src = _load_eval_csv(os.path.join(EVAL_DIR, fn))
-                    df_use = df_src.copy()
-
-                    # Skip RI & TIGGE_IFS only; include persistence and climatology as baselines
-                    low = fn.lower()
-                    if any(tok in low for tok in ("ri", "tigge_ifs")):
-                        continue
-
-                    # Normalize SE column for deterministic/probabilistic/legacy
-                    # Prefer SE_*_mean if present; else SE_*; else square AE_* (or AE_*_mean)
-                    se_base = f"SE_{variable}"
-                    ae_base = f"AE_{variable}"
-                    cand_se = pick_metric_col(df_use, se_base)
-                    if cand_se is not None:
-                        df_use[se_base] = pd.to_numeric(
-                            df_use[cand_se], errors="coerce"
-                        )
-                    else:
-                        cand_ae = pick_metric_col(df_use, ae_base)
-                        if cand_ae is not None:
-                            df_use[se_base] = (
-                                pd.to_numeric(df_use[cand_ae], errors="coerce") ** 2
-                            )
-                    # (Now df_use has an SE_{variable} column even for probabilistic files.)
-
-                    # Compute R² series using SE_* (derived from AE_* if needed) and GT from IBTrACS
-                    try:
-                        r2 = _r2_from_results(
-                            df_use, ibtracs, variable=variable, year=None, debug=False
-                        )
-                    except ValueError as e:
-                        print(f"[R2] Skipping {fn} ({variable}): {e}")
-                        continue
-                    except Exception as e:
-                        print(f"[R2] Skipping {fn} ({variable}) due to error: {e}")
-                        continue
-                    if r2.empty:
-                        print(
-                            f"[R2] No usable R² for {fn} ({variable}) — empty series."
-                        )
-                        continue
-
-                    is_persist = "persistence" in label.lower()
-                    is_clim = _is_climatology(label)
-                    lab = pretty_curve_label(label)
-
-                    if is_persist:
-                        style = dict(
-                            linestyle="--",
-                            color=PERSIST_COLOR,
-                            linewidth=3.0,
-                            markersize=3,
-                            label="Persistence",
-                        )
-                    elif is_clim:
-                        style = dict(
-                            linestyle="--",
-                            color=CLIM_COLOR,
-                            linewidth=3.0,
-                            markersize=3,
-                            label="Mean Tendency by Lead & Basin (MT-LB)",
-                        )
-                    else:
-                        style = dict(
-                            linestyle="-",
-                            marker="o",
-                            linewidth=1.5,
-                            markersize=3,
-                            color=color_for(lab),
-                            label=lab,
-                        )
-                        if _is_google(label):
-                            # FNV3: force gray color; now use dotted to match special treatment
-                            style.update(
-                                dict(
-                                    color="#7a7a7a",
-                                    linestyle=":",
-                                    marker="s",
-                                    linewidth=2.0,
-                                )
-                            )
-                        elif _is_genc(label) or _is_pangu_post(label):
-                            # GENC and PANGU_POST: dotted line, keep their colors
-                            style.update(dict(linestyle=":", marker="s", linewidth=2.0))
-
-                    (h,) = ax.plot(r2.index.values.astype(float), r2.values, **style)
-
-                    if is_persist:
-                        base_handles.append(h)
-                        base_labels.append("Persistence")
-                    elif is_clim:
-                        base_handles.append(h)
-                        base_labels.append("Mean Tendency by Lead & Basin (MT-LB)")
-                    else:
-                        model_handles.append(h)
-                        model_labels.append(lab)
-                    try:
-                        y_max_plotted = max(y_max_plotted, float(np.nanmax(r2.values)))
-                    except Exception:
-                        pass
-
-                # Axes formatting
-                short_title = SHORT_TITLE.get(base, base)
-                ax.set_title(short_title)
-                ax.set_xlabel("Lead time (hours)")
-                ax.set_ylabel("")
-                ax.set_xlim(6, 120)
-                ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
-                ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
-                ax.grid(True, which="major", alpha=0.35)
-                ax.grid(True, which="minor", alpha=0.12)
-                # Zero-skill reference line and fixed, publication-friendly range
-                ax.axhline(0.0, color="k", linewidth=0.8, alpha=0.6)
-                ax.set_ylim(-0.7, 1.0)
-
-                # Legends: models and baselines
-                leg_models = None
-                if model_handles:
-                    pairs = list(zip(model_handles, model_labels))
-                    pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
-                    h_sorted, l_sorted = zip(*pairs)
-                    ncols_r2 = 2 if len(l_sorted) <= 8 else 3
-                    leg_models = ax.legend(
-                        h_sorted,
-                        l_sorted,
-                        fontsize=11,
-                        loc="upper left",
-                        frameon=False,
-                        ncols=ncols_r2,
-                        columnspacing=0.8,
-                        handlelength=2.2,
-                        handletextpad=0.5,
-                    )
-                if base_handles:
-                    leg_base = ax.legend(
-                        base_handles,
-                        base_labels,
-                        fontsize=11,
-                        loc="lower right",
-                        frameon=False,
-                        title="Baselines",
-                    )
-                    if leg_models is not None:
-                        ax.add_artist(leg_models)
-                elif leg_models is None:
-                    ax.legend(fontsize=11, loc="upper left", frameon=False)
-
-                # Done with R² panel
-                continue
-
-            # --- Default panels (existing behaviour)
-            per_forecast = stats.get(base, {})
-            if not per_forecast:
-                ax.set_visible(False)
-                continue
-
-            ax2 = ax.twinx() if SHOW_COUNTS else None
-
-            # Prepare containers to build two legends: models vs baselines
-            model_handles, model_labels = [], []
-            base_handles, base_labels = [], []
-
-            for forecast_label, agg in per_forecast.items():
-                x = agg.index.values.astype(float)
-                y = agg["mean"].values
-
-                is_persist = "persistence" in forecast_label.lower()
-                is_clim = _is_climatology(forecast_label)
-
-                # Skip baselines for CARTE panels
-                if base in CARTE_BASES and (is_persist or is_clim):
-                    continue
-
-                # Label text
-                if is_persist:
-                    label_txt = "Persistence"
-                elif is_clim:
-                    label_txt = "Mean Tendency by Lead & Basin (MT-LB)"
-                else:
-                    label_txt = pretty_curve_label(forecast_label)
-
-                # Skip persistence on CRPS panels (we overlay MAE instead), but DO show climatology
-                if base in CRPS_BASES and is_persist:
-                    continue
-
-                # Build style
-                if is_persist:
-                    plot_kwargs = dict(
-                        linestyle="--",
-                        color=PERSIST_COLOR,
-                        linewidth=3.0,
-                        markersize=3,
-                        zorder=10,
-                        label=label_txt,
-                    )
-                elif is_clim:
-                    plot_kwargs = dict(
-                        linestyle="--",
-                        color=CLIM_COLOR,
-                        linewidth=3.0,
-                        markersize=3,
-                        zorder=9,
-                        label=label_txt,
-                    )
-                else:
-                    plot_kwargs = dict(
-                        linestyle="-",
-                        marker="o",
-                        linewidth=1.5,
-                        markersize=3,
-                        label=label_txt,
-                        color=color_for(label_txt),
-                    )
-                    # special styling for Google WeatherLab FNV3 (proprietary)
-                    if _is_google(forecast_label):
-                        # FNV3: force gray + dotted
-                        plot_kwargs.update(
-                            dict(
-                                color="#7a7a7a",
-                                linestyle=":",
-                                marker="s",
-                                linewidth=2.0,
-                            )
-                        )
-                    elif _is_genc(forecast_label) or _is_pangu_post(forecast_label):
-                        # GENC and PANGU_POST: dotted, keep color
-                        plot_kwargs.update(
-                            dict(linestyle=":", marker="s", linewidth=2.0)
-                        )
-
-                (h,) = ax.plot(x, y, **plot_kwargs)
-                try:
-                    y_max_plotted = max(y_max_plotted, float(np.nanmax(y)))
-                except Exception:
-                    pass
-                if is_persist or is_clim:
-                    base_handles.append(h)
-                    base_labels.append(label_txt)
-                else:
-                    model_handles.append(h)
-                    model_labels.append(label_txt)
-
-                # plot sample size on right axis (same color, dashed)
-                if SHOW_COUNTS and ax2 is not None:
-                    if is_persist:
-                        linecolor = PERSIST_COLOR
-                    elif is_clim:
-                        linecolor = CLIM_COLOR
-                    else:
-                        linecolor = color_map.get(forecast_label, None)
-                    ax2.plot(
-                        x,
-                        agg["count"].values,
-                        linestyle="--",
-                        linewidth=1.0,
-                        alpha=0.6,
-                        color=linecolor,
-                        label=f"{clean_label(forecast_label)} (n)",
-                    )
-
-            # If this is a CRPS panel, overlay persistence MAE (from persistence_results.csv)
-            if base in CRPS_BASES and _persist_raw is not None:
-                mae_base = CRPS_TO_MAE.get(base)
-                if mae_base is not None:
-                    # pick the right column from persistence file (prefer *_mean if present)
-                    mae_col = (
-                        f"{mae_base}_mean"
-                        if f"{mae_base}_mean" in _persist_raw.columns
-                        else (mae_base if mae_base in _persist_raw.columns else None)
-                    )
-                    if mae_col is not None and "lead_hours" in _persist_raw.columns:
-                        g_mae = (
-                            _persist_raw[["lead_hours", mae_col]]
-                            .dropna(subset=["lead_hours"])
-                            .groupby("lead_hours")[mae_col]
-                        )
-                        agg_mae = g_mae.mean().sort_index()
-                        if len(agg_mae):
-                            (h_mae,) = ax.plot(
-                                agg_mae.index.values.astype(float),
-                                agg_mae.values,
-                                linestyle="--",
-                                color="black",
-                                linewidth=3,
-                                label="Persistence (MAE)",
-                                zorder=9,
-                            )
-                            try:
-                                y_max_plotted = max(
-                                    y_max_plotted, float(np.nanmax(agg_mae.values))
-                                )
-                            except Exception:
-                                pass
-                            # ensure it appears under the Baselines legend group
-                            base_handles.append(h_mae)
-                            base_labels.append("Persistence (MAE)")
-
-            # Climatology baseline y_max update
-            # Find the h_clim plot and update y_max_plotted if present
-            if os.path.exists(CLIM_FILE):
-                try:
-                    _clim_df = pd.read_csv(CLIM_FILE, low_memory=False)
-                    for cdt in ("Initial Time", "Valid Time"):
-                        if cdt in _clim_df.columns:
-                            _clim_df[cdt] = pd.to_datetime(
-                                _clim_df[cdt], errors="coerce"
-                            )
-                    _clim_df["lead_hours"] = (
-                        _clim_df["Valid Time"] - _clim_df["Initial Time"]
-                    ).dt.total_seconds() / 3600.0
-                    clim_col = _pick_metric_col(_clim_df, base)
-                    if clim_col is not None:
-                        c_agg = (
-                            _clim_df[["lead_hours", clim_col]]
-                            .dropna()
-                            .groupby("lead_hours")[clim_col]
-                            .mean()
-                            .sort_index()
-                        )
-                        if len(c_agg):
-                            try:
-                                y_max_plotted = max(
-                                    y_max_plotted, float(np.nanmax(c_agg.values))
-                                )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            short_title = SHORT_TITLE.get(base, base)
-            ax.set_title(short_title)
-            ax.set_xlabel("Lead time (hours)")
-            ax.set_ylabel("")
-            ax.grid(True, alpha=0.3)
-            ax.set_xlim(6, 120)
-            ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
-            ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
-            ax.grid(True, which="major", alpha=0.35)
-            ax.grid(True, which="minor", alpha=0.12)
-            if base in YLIMS:
-                ax.set_ylim(*YLIMS[base])
-            else:
-                # Dynamic headroom if no explicit cap provided (e.g., CRPS_haversine)
-                if y_max_plotted > 0:
-                    ax.set_ylim(0, y_max_plotted * 1.10)
-
-            # Right axis formatting for counts
-            if SHOW_COUNTS and ax2 is not None:
-                ax2.set_ylabel("Sample size (cases)")
-                ax2.grid(False)
-
-            # Legends: separate models and baselines (with a category title)
-            if SHOW_COUNTS and ax2 is not None:
-                # If counts are shown, merge their handles into the model legend
-                h2, l2 = ax2.get_legend_handles_labels()
-                model_handles_all = model_handles + h2
-                model_labels_all = model_labels + l2
-            else:
-                model_handles_all = model_handles
-                model_labels_all = model_labels
-
-            # Primary legend: models
-            if model_handles_all:
-                # sort so PANGU then PANGU_POST are adjacent and at the top
-                pairs = list(zip(model_handles_all, model_labels_all))
-                pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
-                model_handles_sorted, model_labels_sorted = zip(*pairs)
-                ncols_ = 2 if base == "AE_wind" else 1
-                leg_models = ax.legend(
-                    model_handles_sorted,
-                    model_labels_sorted,
-                    fontsize=11,
-                    loc="upper left",
-                    frameon=False,
-                    ncols=ncols_,
-                )
-            else:
-                leg_models = None
-            # Baselines legend with a title
-            if base_handles:
-                if base in ("DPE_GCD", "CRPS_haversine"):
-                    leg_base = ax.legend(
-                        base_handles,
-                        base_labels,
-                        fontsize=11,
-                        loc="lower right",
-                        bbox_to_anchor=(
-                            1.0,
-                            0.10,
-                        ),  # raise slightly while staying in-axes
-                        frameon=False,
-                        title="Baselines",
-                    )
-                else:
-                    leg_base = ax.legend(
-                        base_handles,
-                        base_labels,
-                        fontsize=11,
-                        loc="lower right",
-                        frameon=False,
-                        title="Baselines",
-                    )
-                if leg_models is not None:
-                    ax.add_artist(leg_models)
-            elif leg_models is None:
-                # Fallback single legend if nothing else
-                ax.legend(fontsize=11, loc="upper left", frameon=False)
-
-    TEST_YEAR = 2023
-    # fig.suptitle(
-    #     f"RAW comparison (test year {TEST_YEAR}): models on native coverage (no persistence filling)",
-    #     fontsize=14,
-    #     y=0.995,
-    # )
-
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    if save:
-        fig.savefig(save_path, format="pdf", bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-    return fig
-
-
 # %% FAIR comparison figure (models filled with persistence on IBTrACS grid)
 # This reproduces persistence_plotter functionality inside plot_errors.py
 
@@ -1367,17 +1161,7 @@ if os.path.exists(PERSIST_PATH):
 else:
     _persist_fair = None
 
-
-def plot_fair_comparison(
-    save: bool = True,
-    save_path: str = "TCBench_fair_comparison.pdf",
-    save_cov_path: str = "TCBench_coverage.pdf",
-    show: bool = True,
-) -> tuple[plt.Figure, plt.Figure]:
-    if _persist_fair is None:
-        raise FileNotFoundError(
-            "persistence_results.csv not found in EVAL_DIR; required for FAIR comparison."
-        )
+if _persist_fair is not None:
     persist_df = _persist_fair.copy()
     # small debug to ensure same population as persistence_plotter
     try:
@@ -1805,6 +1589,11 @@ def plot_fair_comparison(
                 ax.add_artist(leg_models)
 
     # Final layout, then add column/row group titles in figure coordinates
+    fig2.suptitle(
+    "FAIR comparison — metrics on IBTrACS grid (missing values filled by persistence)",
+    fontsize=14,
+    y=0.98,
+)
     fig2.tight_layout(rect=[0.04, 0.06, 0.98, 0.90])
 
     # --- Compute positions for column headers and vertical group labels
@@ -1824,7 +1613,7 @@ def plot_fair_comparison(
     # Place column titles slightly above the top row, with rounded boxes
     col_y = min(0.98, top_y + 0.035)  # clamp within the figure
     col_bbox = dict(
-        boxstyle="round,pad=0.12,rounding_size=0.15",
+        boxstyle="round,pad=0.3,rounding_size=0.15",
         facecolor="white",
         edgecolor="0.5",
         linewidth=0.8,
@@ -1893,12 +1682,8 @@ def plot_fair_comparison(
         bbox=col_bbox_vert,
     )
 
-    if save:
-        fig2.savefig(save_path, format="pdf", bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig2)
+    fig2.savefig("TCBench_fair_comparison.pdf", format="pdf", bbox_inches="tight")
+    plt.show()
 
     # --- Separate Coverage figure (vs IBTrACS): % of IB keys where the raw model has any row
     fig_cov = plt.figure(figsize=(10, 5.0))
@@ -1990,641 +1775,18 @@ def plot_fair_comparison(
     )
 
     fig_cov.tight_layout(rect=[0.04, 0.10, 0.98, 0.95])
-    if save:
-        fig_cov.savefig(save_cov_path, format="pdf", bbox_inches="tight")
-    if show:
-        plt.show()
-    else:
-        plt.close(fig_cov)
-    return fig2, fig_cov
-
-
-# %% Tiered (Physical → Physical+AI → Physical+AI+Postproc) comparison figure
-
-
-def _is_baseline_label(lbl: str) -> bool:
-    low = str(lbl).lower()
-    return ("persistence" in low) or _is_climatology(lbl)
-
-
-def _tier_of_model(lbl: str) -> str:
-    """Classify a model label into one of: 'phys', 'ai', 'postproc', or 'baseline'.
-    Heuristics:
-      - postproc: filename/label contains 'postprocessing' or matches _is_pangu_post
-      - baseline: persistence or climatology
-      - ai: contains common AI model tokens (pangu, aifs, fourcast, graphcast, fnv3/weatherlab, genc, metnet, fno, deepmind)
-      - phys: everything else
-    """
-    low = str(lbl).lower()
-    if _is_baseline_label(lbl):
-        return "baseline"
-    if ("postprocessing" in low) or _is_pangu_post(lbl):
-        return "postproc"
-    ai_tokens = (
-        "pangu",
-        "aifs",
-        "fourcast",
-        "graphcast",
-        "weatherlab",
-        "fnv3",
-        "genc",
-        "metnet",
-        "fno",
-        "deepmind",
-    )
-    if any(tok in low for tok in ai_tokens):
-        return "ai"
-    return "phys"
-
-
-# --- Helper to locate and load RI metrics for a given label ---
-def _find_ri_series(lbl: str) -> pd.Series | None:
-    """Return mean RI_CSI by lead_hours for a given model label.
-    Tries sidecar files in EVAL_DIR and falls back to scanning the directory.
-    """
-    base_lbl = lbl
-    candidates = [
-        f"{base_lbl}_RI_results.csv",
-        f"{base_lbl}_RI.csv",
-        f"RI_{base_lbl}_results.csv",
-        f"RI_{base_lbl}.csv",
-    ]
-    cleaned = clean_label(base_lbl)
-    if cleaned != base_lbl:
-        candidates += [
-            f"{cleaned}_RI_results.csv",
-            f"{cleaned}_RI.csv",
-            f"RI_{cleaned}_results.csv",
-            f"RI_{cleaned}.csv",
-        ]
-
-    ri_path = None
-    for name in candidates:
-        p = os.path.join(EVAL_DIR, name)
-        if os.path.exists(p):
-            ri_path = p
-            break
-    if ri_path is None:
-        low_lbl = base_lbl.lower()
-        for f in os.listdir(EVAL_DIR):
-            if (
-                f.lower().endswith(".csv")
-                and ("ri" in f.lower())
-                and (low_lbl in f.lower())
-            ):
-                ri_path = os.path.join(EVAL_DIR, f)
-                break
-    if ri_path is None:
-        return None
-
-    try:
-        rdf = pd.read_csv(ri_path, low_memory=False)
-    except Exception:
-        return None
-
-    # Ensure lead_hours exists
-    if "lead_hours" not in rdf.columns:
-        if {"Initial Time", "Valid Time"}.issubset(rdf.columns):
-            for c in ("Initial Time", "Valid Time"):
-                rdf[c] = pd.to_datetime(rdf[c], errors="coerce")
-            rdf["lead_hours"] = (
-                rdf["Valid Time"] - rdf["Initial Time"]
-            ).dt.total_seconds() / 3600.0
-        else:
-            for alt in ("lead", "Lead", "LEAD", "forecast_hour"):
-                if alt in rdf.columns:
-                    rdf["lead_hours"] = pd.to_numeric(rdf[alt], errors="coerce")
-                    break
-    if "lead_hours" not in rdf.columns:
-        return None
-
-    # Find a usable RI column
-    col = _pick_metric_col(rdf, "RI_CSI")
-    if col is None:
-        for guess in ("RI_CSI_mean", "RI_CSI", "CSI", "ri_csi"):
-            if guess in rdf.columns:
-                col = guess
-                break
-    if col is None:
-        return None
-
-    s = (
-        rdf[["lead_hours", col]]
-        .dropna(subset=["lead_hours"])
-        .groupby("lead_hours")[col]
-        .mean()
-        .sort_index()
-    )
-    try:
-        s.index = s.index.astype(float)
-    except Exception:
-        pass
-    return s
-
-
-def plot_tiered_model_sets(
-    save: bool = True,
-    out_prefix: str = "TCBench_tiers",
-    fmt: str = "pdf",
-    show: bool = False,
-):
-    """
-    Produce three figures with the following four panels each:
-      (1) Track DPE, (2) CRPS — wind (vmax), (3) CRPS — MSLP (pmin), (4) RI — CSI.
-
-    We render the same layout three times, progressively adding model families:
-      A) physical models only
-      B) physical + AI models
-      C) physical + AI + post-processing models
-
-    Baselines (Persistence, MT‑LB climatology) are always included when available.
-
-    Parameters
-    ----------
-    save : bool
-        Save the figures to disk (default True)
-    out_prefix : str
-        Path prefix used for filenames. We append `_phys`, `_phys_ai`, `_phys_ai_post`.
-    fmt : str
-        File format: 'pdf' (default) or 'png'.
-    show : bool
-        If True, display figures interactively.
-
-    Returns
-    -------
-    list[plt.Figure]
-        The three matplotlib Figure objects in order [phys, phys+ai, phys+ai+post].
-    """
-    # --- gather candidate files similar to plot_raw_comparison ---
-    result_files = sorted(
-        [
-            f
-            for f in os.listdir(EVAL_DIR)
-            if ("RI" not in f) and (f.endswith("_results.csv") or ("baseline" in f))
-        ]
-    )
-    # include ALL post-processing variants (ANN/MLR/UNET/etc.)
-    # no filtering here; selection by tier happens later
-    result_files = result_files
-    # Ensure climatology baseline is included if present
-    _clim_file = os.path.join(EVAL_DIR, "2023_climatology_results.csv")
-    if os.path.exists(_clim_file):
-        clim_name = os.path.basename(_clim_file)
-        if clim_name not in result_files:
-            result_files.append(clim_name)
-    # Blacklist certain sources as in plot_raw_comparison
-    blacklist_substr = ["Gencast", "TIGGE_IFS"]
-    result_files = [
-        f for f in result_files if not any(b in f for b in blacklist_substr)
-    ]
-    if not result_files:
-        raise FileNotFoundError(
-            "No *_results.csv files found in EVAL_DIR after filtering."
-        )
-
-    # Consolidate duplicate variants mapping to the same logical forecast
-    strip_tokens = ["_clean", "_corrected", "(downloaded)", "_results"]
-
-    def _base_key(fname: str) -> str:
-        key = fname.replace("_results.csv", "")
-        for t in strip_tokens:
-            key = key.replace(t, "")
-        return key
-
-    variant_rank = {"_clean": 3, "_corrected": 2}
-
-    def _rank_of(fname: str) -> int:
-        for tok, r in variant_rank.items():
-            if tok in fname:
-                return r
-        return 1
-
-    best = {}
-    for f in result_files:
-        k = _base_key(f)
-        r = _rank_of(f)
-        if (k not in best) or (r > best[k][0]):
-            best[k] = (r, f)
-    result_files = [v[1] for v in best.values()]
-    result_files.sort()
-
-    # Preload persistence for CRPS overlays (MAE proxy when needed)
-    persist_df = _persist_raw  # may be None if not on disk; handled below
-
-    # Metrics to draw (panel order + pretty titles/units)
-    PANELS = [
-        ("DPE_GCD", "DPE — track", "km"),
-        ("CRPS_vmax", "CRPS — wind (vmax)", "kt"),
-        ("CRPS_pmin", "CRPS — MSLP (pmin)", "hPa"),
-        ("RI_CSI", "Rapid Intensification — CSI", ""),
-    ]
-
-    # Build (label → dataframe) map and classification
-    label_to_df: dict[str, pd.DataFrame] = {}
-    label_to_tier: dict[str, str] = {}
-
-    for fn in result_files:
-        path = os.path.join(EVAL_DIR, fn)
-        try:
-            df = _load_eval_csv(path)
-        except Exception:
-            try:
-                df = pd.read_csv(path, low_memory=False)
-            except Exception:
-                continue
-        label = fn.replace("_results.csv", "")
-        # annotate lead_hours
-        if {"Initial Time", "Valid Time"}.issubset(df.columns):
-            for c in ("Initial Time", "Valid Time"):
-                df[c] = pd.to_datetime(df[c], errors="coerce")
-            df["lead_hours"] = (
-                df["Valid Time"] - df["Initial Time"]
-            ).dt.total_seconds() / 3600.0
-        label_to_df[label] = df
-        label_to_tier[label] = _tier_of_model(label)
-
-    # --- Build RI (CSI-by-lead) index from GT + *_RI.csv predictions ---
-    def _ri_bool(series: pd.Series) -> pd.Series:
-        s = series.astype(str).str.strip().str.lower()
-        m = {
-            "1": True,
-            "true": True,
-            "t": True,
-            "yes": True,
-            "y": True,
-            "0": False,
-            "false": False,
-            "f": False,
-            "no": False,
-            "n": False,
-        }
-        out = s.map(m)
-        out[series.isna()] = np.nan
-        return out
-
-    def _ri_load_gt(gt_path: str) -> pd.DataFrame | None:
-        if not os.path.exists(gt_path):
-            return None
-        try:
-            gt = pd.read_csv(gt_path, low_memory=False)
-        except Exception:
-            return None
-        for c in ("Initial Time", "Valid Time"):
-            if c in gt.columns:
-                gt[c] = pd.to_datetime(gt[c], errors="coerce")
-        # find RI true column
-        ri_cols = [c for c in gt.columns if c.lower() in {"ri", "ri_true"}]
-        if not ri_cols:
-            return None
-        gt = gt[["SID", "Initial Time", "Valid Time", ri_cols[0]]].rename(
-            columns={ri_cols[0]: "RI_true"}
-        )
-        gt["RI_true"] = _ri_bool(gt["RI_true"]).astype("boolean").fillna(False)
-        gt = gt.dropna(subset=["Initial Time", "Valid Time"]).copy()
-        gt["lead_hours"] = (
-            (((gt["Valid Time"] - gt["Initial Time"]).dt.total_seconds()) / 3600.0)
-            .round()
-            .astype(int)
-        )
-        return gt
-
-    def _label_keys_for_filename(no_ext: str) -> list[str]:
-        # Map filename (without extension and without trailing _RI) to multiple keys
-        base = no_ext.replace("_RI", "").replace("_ri", "")
-        candidates = [base, clean_label(base), pretty_curve_label(base)]
-        more = [clean_label(k) for k in list(candidates)]
-        for k in more:
-            if k not in candidates:
-                candidates.append(k)
-        return candidates
-
-    def _build_ri_csi_index() -> dict[str, pd.Series]:
-        idx: dict[str, pd.Series] = {}
-        gt = _ri_load_gt(os.path.join(EVAL_DIR, "ibtracs_RI_gt.csv"))
-        if gt is None or gt.empty:
-            return idx
-        # Collect prediction files (exclude GT & TIGGE_IFS; include all postproc variants)
-        pred_files = []
-        for f in os.listdir(EVAL_DIR):
-            low = f.lower()
-            if not low.endswith(".csv"):
-                continue
-            if not (low.endswith("_ri.csv")):
-                continue
-            if "ibtracs_ri_gt" in low:
-                continue
-            if "tigge_ifs" in low:
-                continue
-            pred_files.append(f)
-        pred_files.sort()
-        for fn in pred_files:
-            path = os.path.join(EVAL_DIR, fn)
-            try:
-                df = pd.read_csv(path, low_memory=False)
-            except Exception:
-                continue
-            for c in ("Initial Time", "Valid Time"):
-                if c in df.columns:
-                    df[c] = pd.to_datetime(df[c], errors="coerce")
-            # prediction column guess
-            pcols = [
-                c
-                for c in df.columns
-                if c.lower() in {"ri", "ri_pred", "ri_hat", "ri_prediction"}
-            ]
-            if not pcols:
-                continue
-            df = df[["SID", "Initial Time", "Valid Time", pcols[0]]].rename(
-                columns={pcols[0]: "RI_pred"}
-            )
-            df = df.dropna(subset=["Initial Time", "Valid Time"]).copy()
-            df["RI_pred"] = _ri_bool(df["RI_pred"]).astype("boolean")
-            df["lead_hours"] = (
-                (((df["Valid Time"] - df["Initial Time"]).dt.total_seconds()) / 3600.0)
-                .round()
-                .astype(int)
-            )
-            # Align to GT keys
-            merged = gt.merge(
-                df, on=["SID", "Initial Time", "Valid Time", "lead_hours"], how="left"
-            )
-            # Treat missing predictions as negative (no-RI)
-            pred = merged["RI_pred"].astype("boolean").fillna(False)
-            merged["RI_pred"] = pred
-            y = merged["RI_true"].astype(bool)
-            yhat = merged["RI_pred"].astype(bool)
-            grp = merged["lead_hours"]
-            TP = (y & yhat).groupby(grp).sum().astype(int)
-            FP = (~y & yhat).groupby(grp).sum().astype(int)
-            FN = (y & ~yhat).groupby(grp).sum().astype(int)
-            CSI = TP / (TP + FP + FN).replace(0, np.nan)
-            s = CSI.sort_index()
-            # store under multiple label keys (raw, clean, pretty)
-            base_no_ext = os.path.splitext(fn)[0]
-            for key in _label_keys_for_filename(base_no_ext):
-                idx[key] = s
-        return idx
-
-    _RI_CSI_INDEX = _build_ri_csi_index()
-
-    def _labels_for(selection: str) -> list[str]:
-        """Return the labels to include given a selection key in {phys, phys_ai, phys_ai_post}."""
-        labs = []
-        for lbl, t in label_to_tier.items():
-            if t == "baseline":
-                labs.append(lbl)
-            elif selection == "phys" and t == "phys":
-                labs.append(lbl)
-            elif selection == "phys_ai" and t in ("phys", "ai"):
-                labs.append(lbl)
-            elif selection == "phys_ai_post" and t in ("phys", "ai", "postproc"):
-                labs.append(lbl)
-        return sorted(labs)
-
-    def _plot_one(selection: str, title_suffix: str) -> plt.Figure:
-        nrows, ncols = 2, 2
-        fig, axes = plt.subplots(nrows, ncols, figsize=(12.5, 8.8), squeeze=False)
-        chosen = _labels_for(selection)
-        # Prepare legends containers per-axes
-        for idx, (base, short_title, unit) in enumerate(PANELS):
-            r, c = divmod(idx, ncols)
-            ax = axes[r][c]
-            y_max_plotted = 0.0
-            model_handles, model_labels = [], []
-            base_handles, base_labels = [], []
-
-            # Plot each selected label
-            for lbl in chosen:
-                df = label_to_df.get(lbl)
-                if df is None or df.empty:
-                    continue
-                pretty = pretty_curve_label(lbl)
-                is_persist = "persistence" in lbl.lower()
-                is_clim = _is_climatology(lbl)
-
-                # Determine allowed leads per model family
-                PP_LEADS_24 = [24, 48, 72, 96, 120]
-                is_postproc_model = (
-                    (label_to_tier.get(lbl) == "postproc")
-                    or ("postprocessing" in lbl.lower())
-                    or _is_pangu_post(lbl)
-                )
-                allowed_leads = PP_LEADS_24 if is_postproc_model else EXPLICIT_LEADS
-
-                if base == "RI_CSI":
-                    # Prefer directory-wide CSI index (computed from *_RI.csv)
-                    ri_series = None
-                    # Try multiple keys: raw label, cleaned, pretty, cleaned pretty
-                    for key in (lbl, clean_label(lbl), pretty, clean_label(pretty)):
-                        if key in _RI_CSI_INDEX:
-                            ri_series = _RI_CSI_INDEX[key]
-                            break
-                    # Very rare fallback: if the main file actually contains RI, use it
-                    if ri_series is None:
-                        col_in = _pick_metric_col(df, "RI_CSI")
-                        if col_in is not None and "lead_hours" in df.columns:
-                            g = (
-                                df[["lead_hours", col_in]]
-                                .dropna(subset=["lead_hours"])  # robust
-                                .groupby("lead_hours")[col_in]
-                            )
-                            agg = g.mean().sort_index()
-                            ri_series = pd.Series(
-                                agg.values, index=agg.index.astype(float)
-                            )
-                    if ri_series is None or ri_series.empty:
-                        continue
-                    # Reindex to the allowed lead grid if available
-                    try:
-                        ri_series.index = ri_series.index.astype(float)
-                        ri_series = ri_series.reindex(allowed_leads).dropna()
-                    except Exception:
-                        pass
-                    x = ri_series.index.values.astype(float)
-                    y = ri_series.values
-                else:
-                    col = _pick_metric_col(df, base)
-                    if col is None:
-                        continue
-                    g = (
-                        df[["lead_hours", col]]
-                        .dropna(subset=["lead_hours"])  # robust
-                        .groupby("lead_hours")[col]
-                    )
-                    agg = g.mean().sort_index()
-                    # Reindex to allowed lead grid per model family (e.g., only 24h for postproc)
-                    try:
-                        s = pd.Series(agg.values, index=agg.index.astype(float))
-                    except Exception:
-                        s = pd.Series(agg.values, index=agg.index)
-                    s = s.reindex(allowed_leads).dropna()
-                    x = s.index.values.astype(float)
-                    y = s.values
-
-                if base in ("CRPS_vmax", "CRPS_pmin") and is_persist:
-                    # skip persistence here; we overlay MAE proxy below to keep convention consistent
-                    continue
-
-                if is_persist:
-                    style = dict(
-                        linestyle="--",
-                        color=PERSIST_COLOR,
-                        linewidth=3.0,
-                        label="Persistence",
-                    )
-                elif is_clim:
-                    style = dict(
-                        linestyle="--",
-                        color=CLIM_COLOR,
-                        linewidth=3.0,
-                        label="Mean Tendency by Lead & Basin (MT-LB)",
-                    )
-                else:
-                    style = dict(
-                        linestyle="-",
-                        marker="o",
-                        linewidth=1.5,
-                        markersize=3,
-                        color=color_for(pretty),
-                        label=pretty,
-                    )
-                    if _is_google(lbl):
-                        style.update(
-                            dict(
-                                color="#7a7a7a",
-                                linestyle=":",
-                                marker="s",
-                                linewidth=2.0,
-                            )
-                        )
-                    elif _is_genc(lbl) or _is_pangu_post(lbl):
-                        style.update(dict(linestyle=":", marker="s", linewidth=2.0))
-
-                (h,) = ax.plot(x, y, **style)
-                try:
-                    y_max_plotted = max(y_max_plotted, float(np.nanmax(y)))
-                except Exception:
-                    pass
-                if is_persist or is_clim:
-                    base_handles.append(h)
-                    base_labels.append(style.get("label", pretty))
-                else:
-                    model_handles.append(h)
-                    model_labels.append(pretty)
-
-            # Overlay persistence MAE proxy on CRPS panels if persistence df is available
-            if base in ("CRPS_vmax", "CRPS_pmin") and persist_df is not None:
-                proxy = CRPS_TO_MAE.get(base)
-                if (
-                    proxy is not None
-                    and proxy in persist_df.columns
-                    and "lead_hours" in persist_df.columns
-                ):
-                    g_mae = (
-                        persist_df[["lead_hours", proxy]]
-                        .dropna(subset=["lead_hours"])  # robust
-                        .groupby("lead_hours")[proxy]
-                    )
-                    agg_mae = g_mae.mean().sort_index()
-                    (h_mae,) = ax.plot(
-                        agg_mae.index.values.astype(float),
-                        agg_mae.values,
-                        linestyle="--",
-                        color=PERSIST_COLOR,
-                        linewidth=3,
-                        label="Persistence (MAE)",
-                        zorder=9,
-                    )
-                    base_handles.append(h_mae)
-                    base_labels.append("Persistence (MAE)")
-                    try:
-                        y_max_plotted = max(
-                            y_max_plotted, float(np.nanmax(agg_mae.values))
-                        )
-                    except Exception:
-                        pass
-
-            # Axes cosmetics
-            ax.set_title(short_title + (f"  ({unit})" if unit else ""))
-            ax.set_xlabel("Lead time (hours)")
-            ax.set_xlim(6, 120)
-            ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
-            ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
-            ax.grid(True, which="major", alpha=0.35)
-            ax.grid(True, which="minor", alpha=0.12)
-            if base == "DPE_GCD":
-                ax.set_ylim(0, 2000)
-            elif base == "RI_CSI":
-                ax.set_ylim(0, 0.2)
-            else:
-                if y_max_plotted > 0:
-                    ax.set_ylim(0, y_max_plotted * 1.10)
-
-            # Legends
-            if model_handles:
-                pairs = list(zip(model_handles, model_labels))
-                pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
-                mh, ml = zip(*pairs)
-                leg_models = ax.legend(
-                    mh, ml, fontsize=10, loc="upper left", frameon=False
-                )
-            else:
-                leg_models = None
-            if base_handles:
-                leg_base = ax.legend(
-                    base_handles,
-                    base_labels,
-                    fontsize=10,
-                    loc="lower right",
-                    frameon=False,
-                    title="Baselines",
-                )
-                if leg_models is not None:
-                    ax.add_artist(leg_models)
-
-        # Figure super-title
-        if selection == "phys":
-            stitle = "Physical models only"
-        elif selection == "phys_ai":
-            stitle = "Physical + AI models"
-        else:
-            stitle = "Physical + AI + Post-processing"
-        fig.suptitle(stitle, fontsize=14, y=0.995)
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
-        return fig
-
-    figs = []
-    selections = [
-        ("phys", "_phys"),
-        ("phys_ai", "_phys_ai"),
-        ("phys_ai_post", "_phys_ai_post"),
-    ]
-    for sel, suffix in selections:
-        fig = _plot_one(sel, suffix)
-        figs.append(fig)
-        if save:
-            out_path = f"{out_prefix}{suffix}.{fmt}"
-            fig.savefig(out_path, format=fmt, bbox_inches="tight")
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-    return figs
+    fig_cov.savefig("TCBench_coverage.pdf", format="pdf", bbox_inches="tight")
+    plt.show()
+else:
+    print("⚠️  Skipping FAIR comparison figure: persistence_results.csv not found.")
 
 
 # %% plot scorecard
 
 # --- TCBench scorecard (WeatherBench-style) ---
 
-import os, math
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib.colors import TwoSlopeNorm, LinearSegmentedColormap
-from matplotlib import cm
-
 # ==== CONFIG ====
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+EVAL_DIR = os.path.join(os.curdir, "outputs")
 # Which metrics and labels to plot (one panel per metric)
 METRICS = [
     ("AE_wind", "Abs. Error vmax (kt)"),
@@ -2654,19 +1816,6 @@ def add_lead_hours(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def pick_metric_col(df: pd.DataFrame, base: str) -> str | None:
-    """Prefer *_mean if available (probabilistic); else base; else None."""
-    m = f"{base}_mean"
-    if m in df.columns:
-        return m
-    if base in df.columns:
-        return base
-    # legacy fallback for DPE
-    if base == "DPE_GCD" and "DPE" in df.columns:
-        return "DPE"
-    return None
-
-
 def pretty_name(filename_no_ext: str) -> str:
     # remove year prefix and tidy underscores
     name = filename_no_ext
@@ -2682,7 +1831,11 @@ def pretty_name(filename_no_ext: str) -> str:
     if "genc" in low:
         return "$\\it{GENC}$"
     if "postprocessing_panguweather_ann" in low:
-        return "PANGU_POST"
+        return "PANGU_POST_ANN"
+    if "postprocessing_panguweather_mlr" in low:
+        return "PANGU_POST_MLR"
+    if "postprocessing_panguweather_unet" in low:
+        return "PANGU_POST_UNET"
     return name
 
 
@@ -2700,6 +1853,7 @@ def aggregate_by_lead(df: pd.DataFrame, metric_col: str) -> pd.Series:
     return g.mean().sort_index()
 
 
+_PPOST_KEYS = ("postprocessing_panguweather_ann",)
 # ==== LOAD DATA ====
 # persistence (as its own row)
 persist_path = os.path.join(EVAL_DIR, "persistence_results.csv")
@@ -2707,7 +1861,6 @@ if not os.path.exists(persist_path):
     raise FileNotFoundError("persistence_results.csv not found in EVAL_DIR")
 
 persistence = load_results_file(persist_path)
-_PP_KEEP = "postprocessing_panguweather_ann"
 # model result files (exclude persistence + any *_RI files, and exclude climatology)
 model_files = [
     f
@@ -2721,12 +1874,15 @@ model_files = [
 model_files = [
     f
     for f in model_files
-    if ("postprocessing" not in f.lower()) or (_PP_KEEP in f.lower())
+    if ("postprocessing" not in f.lower()) or any(k in f.lower() for k in _PPOST_KEYS)
 ]
+_MODEL_FILEMAP = {}
 models = {}
 for fn in sorted(model_files):
     df = load_results_file(os.path.join(EVAL_DIR, fn))
-    models[pretty_name(fn[:-4])] = df  # strip .csv
+    pretty = pretty_name(fn[:-4])
+    models[pretty] = df  # strip .csv
+    _MODEL_FILEMAP[pretty] = fn
 
 # Inject persistence into models dict using a consistent label
 models = {"Persistence": persistence, **models}
@@ -2778,6 +1934,69 @@ def _order_rows_fnv3_last(index_list):
 
 
 models = _reorder_models_for_display(models)
+
+# Inject RI_CSI per‑lead values (from *_RI.csv) into each model dataframe so it shows up in the scorecard
+def _compute_ri_csi_series(df_ri: pd.DataFrame) -> pd.Series:
+    """
+    Return per‑lead CSI series if present in an RI file. Accepts 'RI_CSI' or 'CSI'.
+    """
+    df = df_ri.copy()
+    for c in ("Initial Time", "Valid Time"):
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+    if "lead_hours" not in df.columns and {"Initial Time", "Valid Time"}.issubset(df.columns):
+        df["lead_hours"] = (df["Valid Time"] - df["Initial Time"]).dt.total_seconds() / 3600.0
+    col = "RI_CSI" if "RI_CSI" in df.columns else ("CSI" if "CSI" in df.columns else None)
+    if col is None or "lead_hours" not in df.columns:
+        return pd.Series(dtype=float)
+    s = (
+        df[["lead_hours", col]]
+        .dropna(subset=["lead_hours", col])
+        .groupby(df["lead_hours"].round().astype(int))[col]
+        .mean()
+        .sort_index()
+    )
+    s.index = s.index.astype(int)
+    return s
+
+# Inject RI_CSI per‑lead values (from *_RI.csv) into each model dataframe so it shows up in the scorecard
+for pretty_label, fn in list(_MODEL_FILEMAP.items()):
+    ri_fn = fn.replace("_results.csv", "_RI.csv")
+    ri_path = os.path.join(EVAL_DIR, ri_fn)
+    if not os.path.exists(ri_path):
+        continue
+    try:
+        df_ri = pd.read_csv(ri_path, low_memory=False)
+    except Exception:
+        continue
+    s_csi = _compute_ri_csi_series(df_ri)
+    if s_csi.empty:
+        continue
+    # Map per‑lead CSI into the model rows (constant per lead), so aggregate_by_lead() picks it up
+    mdf = models.get(pretty_label)
+    if mdf is None or "lead_hours" not in mdf.columns:
+        continue
+    m = mdf.copy()
+    m["lead_hours_int"] = m["lead_hours"].round().astype(int)
+    m["RI_CSI"] = m["lead_hours_int"].map(s_csi).astype(float)
+    m.drop(columns=["lead_hours_int"], inplace=True)
+    models[pretty_label] = m
+#
+# Add a title to the deterministic scorecard before starting the probabilistic block
+try:
+    _fig_det = plt.gcf()
+    _fig_det.suptitle(
+        "TCBench Scorecard — Deterministic (AE & RI CSI), Test Year 2023 — Baseline: Persistence [BASE]",
+        y=0.98,
+        fontsize=14,
+    )
+    # Ensure the title is not clipped by tight_layout / constrained_layout
+    try:
+        _fig_det.tight_layout(rect=[0.02, 0.03, 0.98, 0.94])
+    except Exception:
+        pass
+except Exception:
+    pass
 # %% probabilistic scorecard (CRPS)
 METRICS_PROB = [
     ("CRPS_haversine", "CRPS — track displacement (km)"),
@@ -2803,7 +2022,7 @@ model_files = [
     f
     for f in model_files
     if ("postprocessing" not in f.lower())
-    or ("postprocessing_panguweather_ann" in f.lower())
+    or any(k in f.lower() for k in _PPOST_KEYS)
 ]
 models = {"Persistence": persistence}
 for fn in sorted(model_files):
@@ -2971,7 +2190,11 @@ for ax, (base, title) in zip(
         plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal"
     )
     cb.set_label("% Difference vs Baseline (Lower Is Better)")
-# fig_prob.suptitle(f"TCBench Scorecard — Probabilistic (CRPS), Test Year {TEST_YEAR} — Baseline: Persistence", fontsize=16, y=0.98)
+fig_prob.suptitle(
+    f"TCBench Scorecard — Probabilistic (CRPS), Test Year {TEST_YEAR} — Baseline: Persistence [BASE]",
+    fontsize=16,
+    y=0.98
+)
 """
 fig_prob.text(
     0.5,
@@ -3138,7 +2361,7 @@ def _ri_scorecard_rows(lead_list, allowed_labels: set[str] | None = None):
             continue
         # Normalize persistence label so it matches the scorecard baseline row
         if "persistence" in low_raw:
-            label = "Persistence [BASE]"
+            label = "Persistence"
         else:
             # Map to the same pretty label used elsewhere
             label = pretty_curve_label(base_name)
@@ -3403,14 +2626,19 @@ fig.text(
     fontsize=10,
 )
 """
-
+# Deterministic scorecard title (set on this figure handle)
+fig.suptitle(
+    "TCBench Scorecard — Deterministic (AE & RI CSI), Test Year 2023 — Baseline: Persistence [BASE]",
+    y=0.98,
+    fontsize=14,
+)
 fig.tight_layout(rect=[0, 0.04, 1, 0.95])
 fig.savefig("TCBench_scorecard_deterministic.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
-# %% RI plotting
+# %%
 # ==== CONFIG ====
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+
 GT_FILE = "ibtracs_RI_gt.csv"  # ground truth file saved by you
 TREAT_MISSING_AS_NEGATIVE = (
     True  # if a model lacks a (SID, t0, vt) prediction, count as 'no-RI'
@@ -3692,7 +2920,10 @@ ypos = np.arange(len(disp))
 cmap = mpl.colormaps.get("tab10")
 bar_colors = []
 for m in labels_bar:
-    if _is_google(m) or "fnv3" in m.lower():
+    ml = str(m).lower()
+    if "persistence" in ml:
+        bar_colors.append("black")
+    elif _is_google(m) or "fnv3" in ml:
         bar_colors.append(color_for("$\\it{FNV3}$"))
     else:
         bar_colors.append(cmap(labels_bar.index(m) % 10))
@@ -3776,6 +3007,13 @@ for i, rect in enumerate(bars_csi.patches):
     legend_handles.append(proxy)
     legend_labels.append(pretty)
 
+# Reorder legend so that Persistence comes first
+_pairs = list(zip(legend_handles, legend_labels))
+_persist = [(h, l) for (h, l) in _pairs if "persistence" in str(l).lower()]
+_others = [(h, l) for (h, l) in _pairs if "persistence" not in str(l).lower()]
+_ordered = (_persist + _others) if (_persist or _others) else _pairs
+legend_handles, legend_labels = zip(*_ordered) if _ordered else (legend_handles, legend_labels)
+
 figA.legend(
     legend_handles,
     legend_labels,
@@ -3818,6 +3056,9 @@ for lab in labels_curve:
         label=pretty,
         color=color_map_curve.get(lab, None),
     )
+    # Force Persistence style (black dashed, thicker line)
+    if "persistence" in str(lab).lower():
+        plot_kwargs.update(color="black", linestyle="--", linewidth=3.0)
     if _is_google_label(lab):
         plot_kwargs.update(
             dict(color="#7a7a7a", linestyle=":", marker="s", linewidth=2.0)
@@ -3848,6 +3089,9 @@ for lab in labels_curve:
         label=pretty,
         color=color_map_curve.get(lab, None),
     )
+    # Force Persistence style (black dashed, thicker line)
+    if "persistence" in str(lab).lower():
+        plot_kwargs.update(color="black", linestyle="--", linewidth=3.0)
     if _is_google_label(lab):
         plot_kwargs.update(
             dict(color="#7a7a7a", linestyle=":", marker="s", linewidth=2.0)
@@ -3867,11 +3111,18 @@ ax_pss.grid(True, alpha=0.3)
 
 # Put the legend below the plots, using the pretty labels already set above
 handles, labels_ = ax_csi.get_legend_handles_labels()
+# Reorder legend so that Persistence comes first
+_pairs = list(zip(handles, labels_))
+_persist = [(h, l) for (h, l) in _pairs if "persistence" in str(l).lower()]
+_others = [(h, l) for (h, l) in _pairs if "persistence" not in str(l).lower()]
+_ordered = (_persist + _others) if (_persist or _others) else _pairs
+handles_ord, labels_ord = zip(*_ordered) if _ordered else (handles, labels_)
+
 figB.legend(
-    handles,
-    labels_,
-    loc="upper center",  # anchor to top of the legend box
-    bbox_to_anchor=(0.5, -0.01),  # place just below the axes area
+    handles_ord,
+    labels_ord,
+    loc="upper center",
+    bbox_to_anchor=(0.5, -0.01),
     ncols=min(4, len(labels_curve)),
     frameon=False,
     fontsize=9,
@@ -3887,327 +3138,95 @@ figB.suptitle(
 """
 figB.tight_layout(rect=[0, 0.08, 1, 0.88])
 plt.show()
+def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sort_key):
+    """
+    Plot RI CSI curves for all models on a single axes.
+    Ensure:
+      - persistence is drawn in black dashed and labeled 'Persistence [BASE]'
+      - persistence is the FIRST entry in the legend
+    """
+    plotted = []  # list of tuples: (handle, label, is_persist)
 
-# %% Post-processing vs PANGU + baselines (pressure & wind, deterministic)
+    for model_name, series in results_dict.items():
+        name_str = str(model_name)
+        is_persist = "persistence" in name_str.lower()
+        display_label = "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
 
-
-def _pp_pretty_label(fn_no_ext: str) -> str:
-    # Compact label for post-processing variants
-    lbl = fn_no_ext
-    for tok in ["_results", "_clean", "_corrected", "(downloaded)"]:
-        lbl = lbl.replace(tok, "")
-    lbl = lbl.replace("2023_", "")
-    # make it shorter if it starts with "postprocessing"
-    low = lbl.lower()
-    if "postprocessing" in low:
-        lbl = lbl.split("postprocessing")[-1]
-        lbl = lbl.strip("_- ").upper() or "POSTPROC"
-    return lbl
-
-
-def _agg_mean_by_lead(df: pd.DataFrame, col: str) -> pd.Series:
-    return (
-        df[["lead_hours", col]]
-        .dropna(subset=["lead_hours"])
-        .groupby("lead_hours")[col]
-        .mean()
-        .sort_index()
-    )
-
-
-def plot_postproc_vs_pangu():
-    # --- discover files
-    files = [f for f in os.listdir(EVAL_DIR) if f.endswith("_results.csv")]
-    postproc_files = [f for f in files if "postprocessing" in f.lower()]
-    if not postproc_files:
-        print("ℹ️ No post-processing *_results.csv files found; skipping this figure.")
-        return
-
-    # choose a single PANGU file (prefer *_clean > *_corrected > base)
-    pangu_candidates = [f for f in files if "pangu" in f.lower()]
-    if not pangu_candidates:
-        print(
-            "⚠️ No PANGU *_results.csv found; plotting post-processing vs baselines only."
-        )
-        pangu_file = None
-    else:
-        # reuse rank_of/base_key helpers if present, else pick the shortest name
-        try:
-            best_pangu = {}
-            for f in pangu_candidates:
-                k = (
-                    base_key(f)
-                    if "base_key" in globals()
-                    else f.replace("_results.csv", "")
-                )
-                r = (
-                    rank_of(f)
-                    if "rank_of" in globals()
-                    else (3 if "_clean" in f else 2 if "_corrected" in f else 1)
-                )
-                if (k not in best_pangu) or (r > best_pangu[k][0]):
-                    best_pangu[k] = (r, f)
-            pangu_file = sorted([v[1] for v in best_pangu.values()])[0]
-        except Exception:
-            pangu_file = sorted(pangu_candidates, key=len)[0]
-
-    # Load baselines
-    persist_path = os.path.join(EVAL_DIR, "persistence_results.csv")
-    persist_df = (
-        pd.read_csv(persist_path, low_memory=False)
-        if os.path.exists(persist_path)
-        else None
-    )
-    if persist_df is not None:
-        for c in ("Initial Time", "Valid Time"):
-            if c in persist_df.columns:
-                persist_df[c] = pd.to_datetime(persist_df[c], errors="coerce")
-        persist_df["lead_hours"] = (
-            persist_df["Valid Time"] - persist_df["Initial Time"]
-        ).dt.total_seconds() / 3600.0
-
-    clim_df = None
-    if os.path.exists(CLIM_FILE):
-        try:
-            clim_df = pd.read_csv(CLIM_FILE, low_memory=False)
-            for c in ("Initial Time", "Valid Time"):
-                if c in clim_df.columns:
-                    clim_df[c] = pd.to_datetime(clim_df[c], errors="coerce")
-            clim_df["lead_hours"] = (
-                clim_df["Valid Time"] - clim_df["Initial Time"]
-            ).dt.total_seconds() / 3600.0
-        except Exception as _e:
-            print(f"⚠️ Could not load climatology baseline: {_e}")
-
-    # Load PANGU + postproc files
-    series_per_model = {}  # name -> {metric -> pd.Series}
-
-    def _safe_load_and_series(path, label_hint):
-        df = (
-            load_and_prepare(path)
-            if "load_and_prepare" in globals()
-            else pd.read_csv(path, low_memory=False)
-        )
-        if "load_and_prepare" not in globals():
-            for c in ("Initial Time", "Valid Time"):
-                if c in df.columns:
-                    df[c] = pd.to_datetime(df[c], errors="coerce")
-            if {"Initial Time", "Valid Time"}.issubset(df.columns):
-                df["lead_hours"] = (
-                    df["Valid Time"] - df["Initial Time"]
-                ).dt.total_seconds() / 3600.0
-
-        out = {}
-        for base in ("AE_pressure", "AE_wind"):
-            col = (
-                pick_metric_col(df, base)
-                if "pick_metric_col" in globals()
-                else (
-                    f"{base}_mean"
-                    if f"{base}_mean" in df.columns
-                    else base if base in df.columns else None
-                )
-            )
-            if col is not None:
-                out[base] = _agg_mean_by_lead(df, col)
-        return out
-
-    if pangu_file is not None:
-        pangu_name = (
-            clean_label(pangu_file.replace("_results.csv", ""))
-            if "clean_label" in globals()
-            else pangu_file.replace("_results.csv", "")
-        )
-        series_per_model[pangu_name] = _safe_load_and_series(
-            os.path.join(EVAL_DIR, pangu_file), pangu_name
-        )
-
-    for f in sorted(postproc_files):
-        name = _pp_pretty_label(f.replace(".csv", ""))
-        series_per_model[name] = _safe_load_and_series(os.path.join(EVAL_DIR, f), name)
-
-    # If nothing to plot, bail
-    if not any(v for v in series_per_model.values()):
-        print("⚠️ No AE_wind / AE_pressure found for post-processing/PANGU; skipping.")
-        return
-
-    # --- figure
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
-    panels = [
-        ("AE_pressure", "Absolute Error (min pressure)", "hPa"),
-        ("AE_wind", "Absolute Error (max wind)", "kt"),
-    ]
-
-    # color palette (keep PANGU distinct, postproc from tab10)
-    # --- DISTINCT STYLES: original PANGU gets a fixed blue; each postproc gets unique color & marker
-
-    tab10 = mpl.colormaps.get("tab10")
-    # Identify original PANGU (exactly one) and post-processing variants
-    names_all = list(series_per_model.keys())
-    name_pangu = None
-    names_pp = []
-    for nm in names_all:
-        low = nm.lower()
-        # Heuristic: consider "postprocessing" (or "postproc", "pp") as post-processing variants
-        if ("postprocessing" in low) or low.startswith("pp-") or low.startswith("pp_"):
-            names_pp.append(nm)
-        elif "pangu" in low and name_pangu is None:
-            name_pangu = nm
+        plot_kwargs = dict(marker="o", linewidth=1.8)
+        if is_persist:
+            plot_kwargs.update(dict(color="black", linestyle="--", linewidth=3.0))
         else:
-            # If a model still contains 'pangu' but is clearly a variant, treat as postproc
-            if "pangu" in low:
-                names_pp.append(nm)
-            else:
-                names_pp.append(nm)
+            plot_kwargs.setdefault("color", color_for(display_label))
 
-    # Build color/marker maps
-    colors = {}
-    markers = {}
-    # Fixed style for the original PANGU (if present)
-    if name_pangu is not None:
-        colors[name_pangu] = "#1f77b4"  # tab:blue
-        markers[name_pangu] = "o"
+        (h_line,) = ax.plot(series.index, series.values, label=display_label, **plot_kwargs)
+        plotted.append((h_line, display_label, is_persist))
 
-    # Assign distinct styles for each post-processing variant
-    # Avoid reusing PANGU blue for postproc; cycle through tab10
-    marker_cycle = ["s", "^", "D", "P", "X", "v", "<", ">", "h", "*"]
-    # %%
-    ci = 0
-    mi = 0
-    for nm in names_all:
-        if nm == name_pangu:
-            continue
-        # choose a tab10 color that's NOT the PANGU blue
-        c = tab10(ci % 10)
-        # if it matches the exact PANGU blue, skip to next
-        if c == "#1f77b4" or (
-            isinstance(c, tuple)
-            and tuple(round(x, 3) for x in c[:3]) == (0.122, 0.467, 0.706)
-        ):
-            ci += 1
-            c = tab10(ci % 10)
-        colors[nm] = c
-        markers[nm] = marker_cycle[mi % len(marker_cycle)]
-        ci += 1
-        mi += 1
+    # ---- Legend: put persistence first, then all others sorted by the provided key
+    if plotted:
+        persist_items = [(h, lbl) for (h, lbl, isp) in plotted if isp]
+        other_items = [(h, lbl) for (h, lbl, isp) in plotted if not isp]
 
-    for ax, (base, title, unit) in zip(axes, panels):
-        y_max = 0.0
+        # Sort "others" by legend sort key if provided
+        if other_items:
+            other_items.sort(key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1])
 
-        # Baselines: Persistence (black dashed)
-        if persist_df is not None:
-            pcol = (
-                pick_metric_col(persist_df, base)
-                if "pick_metric_col" in globals()
-                else (
-                    f"{base}_mean"
-                    if f"{base}_mean" in persist_df.columns
-                    else base if base in persist_df.columns else None
-                )
-            )
-            if pcol is not None:
-                s = _agg_mean_by_lead(persist_df, pcol)
-                (h_persist,) = ax.plot(
-                    s.index.values,
-                    s.values,
-                    linestyle="--",
-                    color="black",
-                    linewidth=3,
-                    label="Persistence",
-                )
-                if len(s):
-                    y_max = max(y_max, float(np.nanmax(s.values)))
+        ordered = persist_items + other_items
 
-        # Baselines: Climatology (cyan dashed, as MT-LB)
-        if clim_df is not None:
-            ccol = (
-                pick_metric_col(clim_df, base)
-                if "pick_metric_col" in globals()
-                else (
-                    f"{base}_mean"
-                    if f"{base}_mean" in clim_df.columns
-                    else base if base in clim_df.columns else None
-                )
-            )
-            if ccol is not None:
-                s = _agg_mean_by_lead(clim_df, ccol)
-                (h_clim,) = ax.plot(
-                    s.index.values,
-                    s.values,
-                    linestyle="--",
-                    color="cyan",
-                    linewidth=3,
-                    label="Mean Tendency by Lead & Basin (MT-LB)",
-                )
-                if len(s):
-                    y_max = max(y_max, float(np.nanmax(s.values)))
-
-        # Models: PANGU + post-processing variants
-        for name, per_metric in series_per_model.items():
-            s = per_metric.get(base)
-            if s is None or s.empty:
+        # Deduplicate labels preserving first occurrence (defensive)
+        seen = set()
+        ordered_unique = []
+        for h, lbl in ordered:
+            if lbl in seen:
                 continue
-            (h,) = ax.plot(
-                s.index.values,
-                s.values,
-                marker=markers.get(name, "o"),
-                linewidth=1.8,
-                markersize=3.8,
-                label=(
-                    pretty_curve_label(name)
-                    if "pretty_curve_label" in globals()
-                    else name
-                ),
-                color=colors.get(name, None),
-            )
-            try:
-                y_max = max(y_max, float(np.nanmax(s.values)))
-            except Exception:
-                pass
+            seen.add(lbl)
+            ordered_unique.append((h, lbl))
 
-        # Cosmetics
-        ax.set_title(title)
-        ax.set_xlabel("Lead time (hours)")
-        ax.set_ylabel(f"{title} ({unit})")
-        ax.set_xlim(6, 120)
-        ax.xaxis.set_major_locator(mticker.MultipleLocator(24))
-        ax.xaxis.set_minor_locator(mticker.MultipleLocator(6))
-        ax.grid(True, which="major", alpha=0.35)
-        ax.grid(True, which="minor", alpha=0.12)
-        if y_max > 0:
-            ax.set_ylim(0, y_max * 1.10)
+        handles_sorted, labels_sorted = zip(*ordered_unique)
+        ax.legend(handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left")
+    else:
+        ax.legend(frameon=False, loc="upper left")
 
-    # One concise legend below both panels
-    handles, labels = [], []
-    for ax in axes:
-        h, l = ax.get_legend_handles_labels()
-        handles += h
-        labels += l
-    # deduplicate while preserving order
-    seen = set()
-    handles_dedup, labels_dedup = [], []
-    for h, l in zip(handles, labels):
-        if l not in seen:
-            seen.add(l)
-            handles_dedup.append(h)
-            labels_dedup.append(l)
+def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sort_key):
+    """
+    Plot RI CSI for each lead (lines with markers), ensuring:
+      - persistence is black dashed and labeled 'Persistence [BASE]'
+      - persistence appears FIRST in the legend
+    """
+    plotted = []  # list of tuples: (handle, label, is_persist)
 
-    fig.legend(
-        handles_dedup,
-        labels_dedup,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.02),
-        ncols=min(5, len(labels_dedup)),
-        frameon=False,
-        fontsize=9,
-    )
-    fig.subplots_adjust(bottom=0.12, wspace=0.35)
-    fig.suptitle(
-        "Post-processing vs PANGU & baselines (test year 2023)", fontsize=14, y=0.995
-    )
-    plt.show()
+    for model_name, series in results_dict.items():
+        name_str = str(model_name)
+        is_persist = "persistence" in name_str.lower()
+        display_label = "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
 
+        plot_kwargs = dict(marker="o", linewidth=1.8)
+        if is_persist:
+            plot_kwargs.update(dict(color="black", linestyle="--", linewidth=3.0))
+        else:
+            plot_kwargs.setdefault("color", color_for(display_label))
 
-# Call it
-plot_postproc_vs_pangu()
-# %%
+        (h_line,) = ax.plot(series.index, series.values, label=display_label, **plot_kwargs)
+        plotted.append((h_line, display_label, is_persist))
+
+    # ---- Legend: persistence first, then others sorted
+    if plotted:
+        persist_items = [(h, lbl) for (h, lbl, isp) in plotted if isp]
+        other_items = [(h, lbl) for (h, lbl, isp) in plotted if not isp]
+
+        if other_items:
+            other_items.sort(key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1])
+
+        ordered = persist_items + other_items
+
+        seen = set()
+        ordered_unique = []
+        for h, lbl in ordered:
+            if lbl in seen:
+                continue
+            seen.add(lbl)
+            ordered_unique.append((h, lbl))
+
+        handles_sorted, labels_sorted = zip(*ordered_unique)
+        ax.legend(handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left")
+    else:
+        ax.legend(frameon=False, loc="upper left")

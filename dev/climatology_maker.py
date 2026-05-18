@@ -19,13 +19,13 @@ parser = argparse.ArgumentParser(description="Evaluate tracks including RI metri
 parser.add_argument(
     "--ibtracs_folder",
     type=str,
-    default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/",
+    default=os.path.join(os.curdir, "data", "ibtracs"),
     help="Folder containing IBTrACS CSV track file",
 )
 parser.add_argument(
     "--results_folder",
     type=str,
-    default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results",
+    default=os.path.join(os.curdir, "outputs"),
     help="Folder containing one or more track CSV files to evaluate",
 )
 parser.add_argument(
@@ -45,25 +45,6 @@ parser.add_argument(
     action="store_true",
     help="Keep track of intensification float value",
 )
-
-# %% emulation for interactive testing
-emulate = True
-if emulate:
-    args = parser.parse_args(
-        [
-            "--ibtracs_folder",
-            "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/",
-            "--results_folder",
-            "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results",
-            "--RI_thresh",
-            "34",
-            # "--RI_window",
-            # "24",
-            "--keep_intensification",
-        ]
-    )
-else:
-    args = parser.parse_args()
 
 # %% Read IBTrACS data
 ibtracs = toolbox.read_hist_track_file(tracks_path=args.ibtracs_folder)
@@ -188,7 +169,7 @@ ibtracs_clim = ibtracs_clim.drop(
     ]
 )
 # %%
-eval_folder = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+eval_folder = os.path.join(os.curdir, "outputs")
 ibtracs_clim.to_csv(f"{eval_folder}/ibtracs_clim.csv", index=False)
 
 # %%

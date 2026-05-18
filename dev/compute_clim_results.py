@@ -23,7 +23,7 @@ from utils import toolbox
 # ------------------ CONFIG ------------------
 EVAL_DIR = os.environ.get(
     "TCBENCH_EVAL_DIR",
-    "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results",
+    os.path.join(os.curdir, "outputs"),
 )
 CLIM_CSV = os.environ.get(
     "IBTRACS_CLIM_CSV",
@@ -74,7 +74,7 @@ def _std_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 def _read_ibtracs_2023() -> pd.DataFrame:
     ib = toolbox.read_hist_track_file(
-        tracks_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
+        tracks_path=os.path.join(os.curdir, "data", "ibtracs")
     )
     ib = ib[ib["ISO_TIME"].dt.year == 2023].copy()
     keep = ["SID", "ISO_TIME", "LAT", "LON", "USA_WIND", "USA_PRES", "BASIN"]
