@@ -8,6 +8,7 @@ used in other scripts to perform the data tasks associated with TCBench
 
 @author: mgomezd1
 """
+
 # %% Imports
 
 import os
@@ -17,10 +18,12 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib
 import xarray as xr
-import metpy.calc as mpcalc
-import metpy.units as mpunits
+
+# import metpy.calc as mpcalc
+# import metpy.units as mpunits
 import joblib as jl
-from memory_profiler import profile
+
+# from memory_profiler import profile
 from pint import Quantity
 import dask
 import dask.array as da
@@ -543,7 +546,7 @@ class Data_Collection:
     #     return ds, data_var_dict
 
     # TODO: Figure out why this explodes memory usage and fix it
-    @profile
+    # @profile
     def calculate_field(
         self,
         function: callable,
@@ -571,11 +574,11 @@ class Data_Collection:
         None or xarray.Dataset
         """
         # Check if the function is a metpy callable
-        if hasattr(mpcalc, function.__name__):
-            # if it is, check that the required units are passed as kwargs
-            assert (
-                "units" in kwargs.keys()
-            ), f"Units are required for {function.__name__} since it's a metpy function."
+        # if hasattr(mpcalc, function.__name__):
+        #     # if it is, check that the required units are passed as kwargs
+        #     assert (
+        #         "units" in kwargs.keys()
+        #     ), f"Units are required for {function.__name__} since it's a metpy function."
 
         # check that the argument names are a dict
         assert isinstance(
@@ -705,16 +708,17 @@ class Data_Collection:
 
             # calculate the field
             data = function(**temp_dict)
-            units = kwargs.get("out_units", str(data.metpy.units))
+            units = kwargs.get("out_units", None)  # str(data.metpy.units))
             print("Fine till here")
-            # create a dataset from the dataarray
-            data = (
-                data.metpy.dequantify()
-                .to_dataset(
-                    name=function.__name__,
-                )
-                .compute()
-            )
+            # # create a dataset from the dataarray
+            # data = (
+            #     data.metpy.dequantify()
+            #     .to_dataset(
+            #         name=function.__name__,
+            #     )
+            #     .compute()
+            # )
+            data = data.compute().to_dataset(name=function.__name__)
 
             # add the attributes
             data.attrs = {

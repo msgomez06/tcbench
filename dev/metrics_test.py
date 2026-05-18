@@ -565,7 +565,7 @@ def _DPE(reference, predictions, **kwargs):
     storm_list = [sid for sid in pred_sids if sid in ref_sids]
 
     # process the storms with joblib parallel (preserving each subset's original indices)
-    results = jl.Parallel(n_jobs=6)(
+    results = jl.Parallel(n_jobs=6, prefer="threads")(
         jl.delayed(storm_processor)(reference, predictions, storm_id)
         for storm_id in storm_list
     )
@@ -822,7 +822,7 @@ def _SE(reference, predictions, **kwargs):
     ref_sids = reference[ref_cols["SID"]].unique()
     storm_list = [sid for sid in pred_sids if sid in ref_sids]
 
-    results = jl.Parallel(n_jobs=6)(
+    results = jl.Parallel(n_jobs=6, prefer="threads")(
         jl.delayed(storm_processor)(reference, predictions, storm_id)
         for storm_id in storm_list
     )
@@ -1148,7 +1148,7 @@ def _AE(reference, predictions, **kwargs):
     ref_sids = reference[ref_cols["SID"]].unique()
     storm_list = [sid for sid in pred_sids if sid in ref_sids]
 
-    results = jl.Parallel(n_jobs=6)(
+    results = jl.Parallel(n_jobs=6, prefer="threads")(
         jl.delayed(storm_processor)(reference, predictions, storm_id)
         for storm_id in storm_list
     )
@@ -1273,9 +1273,9 @@ def _CARTE(reference, predictions, **kwargs):
     # Work on copies; ensure datetime
     ref = reference.copy()
     preds = predictions.copy()
-    ref.loc[:, ref_cols["initial_time"]] = pd.to_datetime(ref[ref_cols["initial_time"]])
-    preds.loc[:, pred_cols["valid_time"]] = pd.to_datetime(preds[pred_cols["valid_time"]])
-    preds.loc[:, pred_cols["init_time"]] = pd.to_datetime(preds[pred_cols["init_time"]])
+    ref[ref_cols["initial_time"]] = pd.to_datetime(ref[ref_cols["initial_time"]])
+    preds[pred_cols["valid_time"]] = pd.to_datetime(preds[pred_cols["valid_time"]])
+    preds[pred_cols["init_time"]] = pd.to_datetime(preds[pred_cols["init_time"]])
 
     # Output scaffold aligned to caller
     out = pd.DataFrame(index=preds.index, columns=["Along_TE", "Cross_TE", "DPE_cart"], dtype=float)
@@ -1424,7 +1424,7 @@ def _CARTE(reference, predictions, **kwargs):
         return pred_data.reindex(columns=["Along_TE", "Cross_TE", "DPE_cart"])
 
     # Parallel per storm
-    results = jl.Parallel(n_jobs=6)(jl.delayed(process_one)(sid) for sid in storm_list)
+    results = jl.Parallel(n_jobs=6, prefer="threads")(jl.delayed(process_one)(sid) for sid in storm_list)
     temp_df = pd.concat(results, axis=0) if len(results) else pd.DataFrame(columns=["Along_TE", "Cross_TE", "DPE_cart"])
 
     # Align to caller order

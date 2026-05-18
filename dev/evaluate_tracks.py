@@ -113,6 +113,7 @@ def evaluate_tracks(
             print(
                 f"Candidates in '{eval_folder}': {len(track_files_all)} | to compute (recompute=True): {len(track_files)}"
             )
+            print(track_files)
         else:
             mode = "RI missing" if only_ri else "no _results.csv yet"
             print(

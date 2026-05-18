@@ -119,14 +119,19 @@ parser = argparse.ArgumentParser(
     description="Plot TCBench error comparisons and coverage."
 )
 parser.add_argument(
-    "ibtracs_path",
+    "--ibtracs_path",
     type=str,
     help="Path to the IBTrACS track folder containing the file (CSV) for 2023, used for coverage computation.",
     default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/",
 )
+parser.add_argument(
+    "--eval_dir",
+    type=str,
+    help="Path to the directory containing the evaluation results CSV files.",
+    default="/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results",
+)
 
 args = parser.parse_args()
-
 
 mpl.rcParams.update(
     {
@@ -254,37 +259,88 @@ def _build_ib_denom_from_df(ib_df: pd.DataFrame, leads=EXPLICIT_LEADS) -> pd.Ser
         try:
             dt = dt.dt.tz_localize(None)
         except Exception:
-            # already naive
             pass
     dt = dt.dt.floor("h")
     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
 
-    # Convert to integer hours since epoch for fast membership tests
     counts: dict[float, int] = {}
-    lead_list = [int(l) for l in leads]
+    lead_timedeltas = [pd.Timedelta(hours=int(l)) for l in leads]
+    lead_hours = [float(int(l)) for l in leads]
 
     for sid, grp in df.groupby("SID", sort=False):
         h = grp["ISO_TIME"].drop_duplicates().sort_values()
-        # all 6-hourly timestamps available for this SID (vt can be any 6h)
-        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
-        h_int_all = h_int_all[h_int_all % 6 == 0]
-        hset = set(h_int_all.tolist())
+
+        # Keep only 6-hourly synoptic times (00, 06, 12, 18 UTC)
+        h_6h = h[h.dt.hour.isin([0, 6, 12, 18])]
+        hset = set(h_6h)
         if not hset:
             continue
-        # Restrict *initializations* to 00Z/12Z, but keep vt on full 6-hour grid
+
+        # Restrict initializations to 00Z/12Z if INIT_HOURS is defined
         if "INIT_HOURS" in globals() and INIT_HOURS:
-            t0_candidates = [t for t in h_int_all if (t % 24) in INIT_HOURS]
+            t0_candidates = [t for t in h_6h if t.hour in INIT_HOURS]
         else:
-            t0_candidates = list(h_int_all)
+            t0_candidates = list(h_6h)
         if not t0_candidates:
             continue
+
         for t0 in t0_candidates:
-            for lh in lead_list:
-                if (t0 + lh) in hset:
-                    counts[float(lh)] = counts.get(float(lh), 0) + 1
+            for td, lh in zip(lead_timedeltas, lead_hours):
+                if (t0 + td) in hset:
+                    counts[lh] = counts.get(lh, 0) + 1
 
     s = pd.Series(counts, dtype=float).sort_index()
     return s
+
+
+# def _build_ib_denom_from_df(ib_df: pd.DataFrame, leads=EXPLICIT_LEADS) -> pd.Series:
+#     """Counts IBTrACS (SID, t0, vt) keys by lead from an in-memory IBTrACS dataframe.
+#     Robust to tz-aware timestamps and sub-hour noise by normalizing to *hour* grid.
+#     """
+#     if ib_df is None or ib_df.empty:
+#         return pd.Series(dtype=float)
+#     df = ib_df.copy()
+#     if "ISO_TIME" not in df.columns or "SID" not in df.columns:
+#         return pd.Series(dtype=float)
+
+#     # Normalize timestamps: coerce, drop tz, floor to hour
+#     dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
+#     if hasattr(dt.dt, "tz_localize"):
+#         try:
+#             dt = dt.dt.tz_localize(None)
+#         except Exception:
+#             # already naive
+#             pass
+#     dt = dt.dt.floor("h")
+#     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
+
+#     # Convert to integer hours since epoch for fast membership tests
+#     counts: dict[float, int] = {}
+#     lead_list = [int(l) for l in leads]
+
+#     for sid, grp in df.groupby("SID", sort=False):
+#         h = grp["ISO_TIME"].drop_duplicates().sort_values()
+#         h_int_all = h[h.dt.hour.isin([6,12])]
+#         # all 6-hourly timestamps available for this SID (vt can be any 6h)
+#         h_int_all = (h.astype("int64") // 3_600_000_000_000).to_numpy()
+#         h_int_all = h_int_all[h_int_all % 6 == 0]
+#         hset = set(h_int_all.tolist())
+#         if not hset:
+#             continue
+#         # Restrict *initializations* to 00Z/12Z, but keep vt on full 6-hour grid
+#         if "INIT_HOURS" in globals() and INIT_HOURS:
+#             t0_candidates = [t for t in h_int_all if (t % 24) in INIT_HOURS]
+#         else:
+#             t0_candidates = list(h_int_all)
+#         if not t0_candidates:
+#             continue
+#         for t0 in t0_candidates:
+#             for lh in lead_list:
+#                 if (t0 + lh) in hset:
+#                     counts[float(lh)] = counts.get(float(lh), 0) + 1
+
+#     s = pd.Series(counts, dtype=float).sort_index()
+#     return s
 
 
 def _build_ib_denominator_counts_unified(
@@ -311,7 +367,6 @@ def _build_ib_denominator_counts_unified(
 IB_KEYS_2023 = _build_ib_denominator_counts_unified(leads=EXPLICIT_LEADS, ib_df=ibtracs)
 
 
-# --- IBTrACS denominator aligned to a model's initializations
 def _aligned_ib_denominator_for_model(
     model_df: pd.DataFrame, ib_df: pd.DataFrame, leads=EXPLICIT_LEADS
 ) -> pd.Series:
@@ -323,28 +378,29 @@ def _aligned_ib_denominator_for_model(
     if model_df is None or model_df.empty or ib_df is None or ib_df.empty:
         return pd.Series(dtype=float)
 
-    # normalize model times
+    # --- Normalize model times ---
     m = model_df.copy()
     for c in ("Initial Time", "Valid Time"):
         if c in m.columns:
             m[c] = pd.to_datetime(m[c], errors="coerce")
     m = m.dropna(subset=["SID", "Initial Time"]).copy()
-    # Use unique (SID, t0-hour) initializations in the model
+
     m["Initial Time"] = (
         m["Initial Time"]
         .dt.tz_localize(None, nonexistent="shift_forward", ambiguous="NaT")
         .dt.floor("h")
     )
-    m["Initial Time_hr"] = (
-        m["Initial Time"].astype("int64", copy=False) // 3_600_000_000_000
-    )
-    m = m[m["Initial Time_hr"] % 6 == 0]
-    # Restrict to synoptic hours 00Z/12Z
+
+    # Keep only 6-hourly synoptic times
+    m = m[m["Initial Time"].dt.hour.isin([0, 6, 12, 18])]
+
+    # Restrict to configured init hours (e.g. 00Z/12Z)
     if "INIT_HOURS" in globals() and INIT_HOURS:
         m = m[m["Initial Time"].dt.hour.isin(INIT_HOURS)]
-    model_t0 = set(zip(m["SID"], m["Initial Time_hr"].to_numpy()))
 
-    # normalize ibtracs times
+    model_t0 = set(zip(m["SID"], m["Initial Time"]))
+
+    # --- Normalize IBTrACS times ---
     df = ib_df.copy()
     dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
     if hasattr(dt.dt, "tz_localize"):
@@ -356,28 +412,104 @@ def _aligned_ib_denominator_for_model(
     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
 
     counts: dict[float, int] = {}
-    lead_list = [int(l) for l in leads]
+    lead_timedeltas = [pd.Timedelta(hours=int(l)) for l in leads]
+    lead_hours = [float(int(l)) for l in leads]
 
     for sid, grp in df.groupby("SID", sort=False):
         h = grp["ISO_TIME"].drop_duplicates().sort_values()
-        # all 6-hourly timestamps available for this SID (vt can be any 6h)
-        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
-        h_int_all = h_int_all[h_int_all % 6 == 0]
-        if len(h_int_all) == 0:
+
+        # Keep only 6-hourly synoptic times
+        h_6h = h[h.dt.hour.isin([0, 6, 12, 18])]
+        if h_6h.empty:
             continue
-        hset = set(h_int_all.tolist())
-        # Only consider t0 that exist in the model for this SID, and keep them on 00/12Z
+        hset = set(h_6h)
+
+        # Only consider t0 that exist in the model for this SID
         t0_for_sid = [t0 for (s, t0) in model_t0 if s == sid]
+
+        # INIT_HOURS filter already applied above when building model_t0,
+        # but apply again if needed for safety
         if "INIT_HOURS" in globals() and INIT_HOURS:
-            t0_for_sid = [t0 for t0 in t0_for_sid if (t0 % 24) in INIT_HOURS]
+            t0_for_sid = [t0 for t0 in t0_for_sid if t0.hour in INIT_HOURS]
+
         if not t0_for_sid:
             continue
+
         for t0 in t0_for_sid:
-            for lh in lead_list:
-                if (t0 + lh) in hset:
-                    counts[float(lh)] = counts.get(float(lh), 0) + 1
+            for td, lh in zip(lead_timedeltas, lead_hours):
+                if (t0 + td) in hset:
+                    counts[lh] = counts.get(lh, 0) + 1
 
     return pd.Series(counts, dtype=float).sort_index()
+
+
+# # --- IBTrACS denominator aligned to a model's initializations
+# def _aligned_ib_denominator_for_model(
+#     model_df: pd.DataFrame, ib_df: pd.DataFrame, leads=EXPLICIT_LEADS
+# ) -> pd.Series:
+#     """
+#     Denominator aligned to a given model:
+#     counts IBTrACS (SID, t0, t0+L) pairs only for (SID, t0) initial times that
+#     appear in the model file. This avoids penalizing models for missing inits.
+#     """
+#     if model_df is None or model_df.empty or ib_df is None or ib_df.empty:
+#         return pd.Series(dtype=float)
+
+#     # normalize model times
+#     m = model_df.copy()
+#     for c in ("Initial Time", "Valid Time"):
+#         if c in m.columns:
+#             m[c] = pd.to_datetime(m[c], errors="coerce")
+#     m = m.dropna(subset=["SID", "Initial Time"]).copy()
+#     # Use unique (SID, t0-hour) initializations in the model
+#     m["Initial Time"] = (
+#         m["Initial Time"]
+#         .dt.tz_localize(None, nonexistent="shift_forward", ambiguous="NaT")
+#         .dt.floor("h")
+#     )
+#     m["Initial Time_hr"] = (
+#         m["Initial Time"].astype("int64", copy=False) // 3_600_000_000_000
+#     )
+#     m = m[m["Initial Time_hr"] % 6 == 0]
+#     # Restrict to synoptic hours 00Z/12Z
+#     if "INIT_HOURS" in globals() and INIT_HOURS:
+#         m = m[m["Initial Time"].dt.hour.isin(INIT_HOURS)]
+#     model_t0 = set(zip(m["SID"], m["Initial Time_hr"].to_numpy()))
+
+#     # normalize ibtracs times
+#     df = ib_df.copy()
+#     dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
+#     if hasattr(dt.dt, "tz_localize"):
+#         try:
+#             dt = dt.dt.tz_localize(None)
+#         except Exception:
+#             pass
+#     dt = dt.dt.floor("h")
+#     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
+
+#     counts: dict[float, int] = {}
+#     lead_list = [int(l) for l in leads]
+
+#     for sid, grp in df.groupby("SID", sort=False):
+#         h = grp["ISO_TIME"].drop_duplicates().sort_values()
+#         # all 6-hourly timestamps available for this SID (vt can be any 6h)
+#         h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
+#         h_int_all = h_int_all[h_int_all % 6 == 0]
+#         if len(h_int_all) == 0:
+#             continue
+#         hset = set(h_int_all.tolist())
+#         # Only consider t0 that exist in the model for this SID, and keep them on 00/12Z
+#         t0_for_sid = [t0 for (s, t0) in model_t0 if s == sid]
+#         if "INIT_HOURS" in globals() and INIT_HOURS:
+#             t0_for_sid = [t0 for t0 in t0_for_sid if (t0 % 24) in INIT_HOURS]
+#         if not t0_for_sid:
+#             continue
+#         for t0 in t0_for_sid:
+#             for lh in lead_list:
+#                 if (t0 + lh) in hset:
+#                     counts[float(lh)] = counts.get(float(lh), 0) + 1
+
+#     return pd.Series(counts, dtype=float).sort_index()
 
 
 # print("[DEBUG][IB_DENOM] leads present:", list(IB_KEYS_2023.index.astype(int)))
@@ -528,7 +660,7 @@ PERSIST_COLOR = "black"
 CLIM_COLOR = "cyan"
 
 
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+EVAL_DIR = args.eval_dir
 # Global path for climatology results (used by RAW, FAIR and scorecards)
 CLIM_FILE = os.path.join(EVAL_DIR, "2023_climatology_results.csv")
 
@@ -555,9 +687,7 @@ if toolbox is None:
         "IBTrACS toolbox is required but not available: cannot compute coverage without IBTrACS."
     )
 try:
-    ibtracs = toolbox.read_hist_track_file(
-        tracks_path="/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs/"
-    )
+    ibtracs = toolbox.read_hist_track_file(tracks_path=args.ibtracs_path)
     ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023].copy()
     if ibtracs.empty:
         raise RuntimeError("Loaded IBTrACS (2023) is empty.")
@@ -567,9 +697,7 @@ except Exception as _e:
 
 # ---- Shared helpers for FAIR/CLIM-FAIR coverage (IBTrACS-denominator & raw-model coverage)
 
-IBTRACS_DIR = (
-    "/work/FAC/FGSE/IDYST/tbeucler/default/milton/repos/alpha_bench/tracks/ibtracs"
-)
+IBTRACS_DIR = args.ibtracs_path
 IBTRACS_2023_CSV = os.path.join(IBTRACS_DIR, "IBTrACS_2023.csv")
 
 
@@ -2624,7 +2752,7 @@ from matplotlib.colors import TwoSlopeNorm, LinearSegmentedColormap
 from matplotlib import cm
 
 # ==== CONFIG ====
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+EVAL_DIR = args.eval_dir  # directory containing *_results.csv files
 # Which metrics and labels to plot (one panel per metric)
 METRICS = [
     ("AE_wind", "Abs. Error vmax (kt)"),
@@ -3410,7 +3538,7 @@ plt.show()
 
 # %% RI plotting
 # ==== CONFIG ====
-EVAL_DIR = "/work/FAC/FGSE/IDYST/tbeucler/default/milton/TCBench Results"
+EVAL_DIR = args.eval_dir
 GT_FILE = "ibtracs_RI_gt.csv"  # ground truth file saved by you
 TREAT_MISSING_AS_NEGATIVE = (
     True  # if a model lacks a (SID, t0, vt) prediction, count as 'no-RI'
