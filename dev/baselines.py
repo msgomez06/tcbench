@@ -1,7 +1,7 @@
 # Climatology Baseline Models
 # Date: 2024.05.24
-# This file contains the implementation of baseline models that output climatology.
-# Author: Milton Gomez
+# This file contains the implementation of baseline models for TCBench.
+# Author: mgomezd1
 # %% Imports
 # OS and IO
 import os
@@ -11,7 +11,6 @@ import matplotlib as mpl
 import numpy as np
 import dask.array as da
 import pandas as pd
-
 
 # ML Libraries
 import torch

@@ -4,7 +4,8 @@
 Created on Fri Jun  9 10:45:42 2023
 
 This file contains a "toolbox" library - functions and constants that will be
-used in other scripts to perform the tasks associated with TCBench
+used in other scripts to perform tasks associated with TCBench and post-processing
+models
 
 @author: mgomezd1
 """
@@ -3725,7 +3726,7 @@ class ReAnal:
                 self, "ds"
             ), f"ReAnal dataset not found for {self.__parent.uid} with model {self.model}"
 
-            (_, _, time_coord, _, _) = get_coord_vars(self.ds)
+            _, _, time_coord, _, _ = get_coord_vars(self.ds)
 
             # Get ground truth and valid timestamps
             gt, stamps = self.__parent.get_ground_truth(**kwargs)

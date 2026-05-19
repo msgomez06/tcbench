@@ -14,12 +14,35 @@ from utils.toolbox import load_eval_csv as _load_eval_csv
 from utils.toolbox import compute_r2_by_lead_from_results as _r2_from_results
 from utils.toolbox import pick_metric_col
 
+import sys
+import argparse
+
+parser = argparse.ArgumentParser(
+    description="Plot TCBench error comparisons and coverage."
+)
+parser.add_argument(
+    "--ibtracs_path",
+    type=str,
+    help="Path to the IBTrACS track folder containing the file (CSV) for 2023, used for coverage computation.",
+    default=os.path.join(os.curdir, "data", "ibtracs"),
+)
+parser.add_argument(
+    "--eval_dir",
+    type=str,
+    help="Path to the directory containing the evaluation results CSV files.",
+    default=os.path.join(os.curdir, "outputs"),
+)
+args = parser.parse_args()
 
 
 # --- Silence all stdout/stderr prints and warnings in this module
 import warnings as _warnings
+
+
 def _log(*args, **kwargs):
     return
+
+
 print = _log  # make all prints no-ops inside this module
 _warnings.filterwarnings("ignore")
 
@@ -37,6 +60,7 @@ mpl.rcParams.update(
     }
 )
 
+
 # helpers for naming quantile aggregations
 def q25(s):
     return s.quantile(0.25)
@@ -46,7 +70,7 @@ def q75(s):
     return s.quantile(0.75)
 
 
-EVAL_DIR = os.path.join(os.curdir, "outputs")
+EVAL_DIR = args.eval_dir
 
 PERSIST_PATH = os.path.join(EVAL_DIR, "persistence_results.csv")
 _persist_raw = None
@@ -69,9 +93,7 @@ if toolbox is None:
         "IBTrACS toolbox is required but not available: cannot compute coverage without IBTrACS."
     )
 try:
-    ibtracs = toolbox.read_hist_track_file(
-        tracks_path=os.path.join(os.curdir, "data", "ibtracs")
-    )
+    ibtracs = toolbox.read_hist_track_file(tracks_path=args.ibtracs_path)
     ibtracs = ibtracs[ibtracs["ISO_TIME"].dt.year == 2023].copy()
     if ibtracs.empty:
         raise RuntimeError("Loaded IBTrACS (2023) is empty.")
@@ -282,7 +304,57 @@ for base in NON_R2_BASES:
             )
 
 # Define color map keyed by forecast label using default color cycle
-colors = cycle(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+# Based on Martin Krzywinski's 15-color palette for "Designing for Color Blindness"
+# https://mk.bcgsc.ca/colorblind/palettes.mhtml#12-color-palette-for-colorbliness
+# COLORBLIND_COLORS = [
+#     "#68023F",  # Tyrian Purple
+#     "#008169", # Deep Sea
+#     "#EF0096",  # persian rose
+#     "#00DCB5", # aquamarine
+#     "#FFCFE2", # azalea
+#     "#003C86", # congress blue
+#     "#9400E6", # veronica
+#     "#009FFA", # bleu de france
+#     "#FF71FD", # shocking pink
+#     "#7DFFFA", # electric blue
+#     "#6A0213", # rosewood
+#     "#008607", # india green
+#     "#F60239", # tractor red
+#     "#00E307", # radioactive green
+#     "#FFDC3D", # gargoyle gas
+# ]
+# color_list = COLORBLIND_COLORS
+# colors = cycle(COLORBLIND_COLORS)
+
+MAX_DISTINCT = [
+    "#%02x%02x%02x" % (202, 82, 52),
+    "#%02x%02x%02x" % (30, 185, 164),
+    "#%02x%02x%02x" % (138, 50, 49),
+    "#%02x%02x%02x" % (77, 60, 143),
+    "#%02x%02x%02x" % (60, 133, 78),
+    "#%02x%02x%02x" % (0, 115, 137),
+    "#%02x%02x%02x" % (171, 81, 186),
+    "#%02x%02x%02x" % (212, 142, 72),
+    "#%02x%02x%02x" % (131, 125, 46),
+    "#%02x%02x%02x" % (222, 133, 125),
+    "#%02x%02x%02x" % (205, 73, 118),
+    # "#%02x%02x%02x" % (222, 129, 194), Used for MT-LB (climatology inspired baseline)
+    "#%02x%02x%02x" % (166, 147, 218),
+    "#%02x%02x%02x" % (127, 50, 106),
+    "#%02x%02x%02x" % (85, 109, 188),
+    "#%02x%02x%02x" % (85, 168, 213),
+    "#%02x%02x%02x" % (114, 185, 85),
+    "#%02x%02x%02x" % (58, 86, 18),
+    "#%02x%02x%02x" % (191, 174, 71),
+    "#%02x%02x%02x" % (126, 76, 9),
+]
+color_list = MAX_DISTINCT
+colors = cycle(MAX_DISTINCT)
+
+# TAB_COLORS = [mpl.colors.to_hex(c) for c in mpl.colormaps["tab10"].colors]
+# color_list = TAB_COLORS
+# colors = cycle(TAB_COLORS)
+
 forecast_labels = sorted({lbl for base in stats for lbl in stats[base]})
 color_map = {lbl: col for lbl, col in zip(forecast_labels, colors)}
 
@@ -333,6 +405,7 @@ def clean_label(lbl):
         lbl = lbl[5:]
     return lbl
 
+
 # --- Helper: Pick best available SE column for R² computation
 def _pick_se_col_for_r2(df: pd.DataFrame, variable: str) -> str | None:
     """
@@ -367,6 +440,8 @@ RENAME_SHORT = {
     "weatherlab_FNV3": "FNV3",
     "2023_weatherlab_FNV3": "FNV3",
 }
+
+
 def pretty_curve_label(lbl: str) -> str:
     lowlbl = lbl.lower()
     base = clean_label(lbl)
@@ -409,7 +484,7 @@ def _legend_sort_key(lbl: str):
 
 
 # --- Global consistent color mapping (same color per model everywhere)
-_COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+_COLOR_CYCLE = iter(color_list)
 _COLOR_MAP_GLOBAL: dict[str, str] = {}
 
 
@@ -427,7 +502,7 @@ def color_for(pretty_label: str) -> str:
         try:
             _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
         except StopIteration:
-            _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+            _COLOR_CYCLE = iter(color_list)
             _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
     return _COLOR_MAP_GLOBAL[key]
 
@@ -436,7 +511,11 @@ def color_for(pretty_label: str) -> str:
 # --- plotting
 # Baseline styles
 PERSIST_COLOR = "black"
-CLIM_COLOR = "cyan"  # distinct from persistence; dashed thick too
+CLIM_COLOR = "#%02x%02x%02x" % (
+    222,
+    129,
+    194,
+)  # "cyan"  # distinct from persistence; dashed thick too
 
 nrows = len(PANEL_GRID)
 ncols = len(PANEL_GRID[0])
@@ -483,7 +562,9 @@ for r, row in enumerate(PANEL_GRID):
                         df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce")
                     elif se_cand.startswith("AE_"):
                         # fallback: square AE (or AE_mean) to approximate SE
-                        df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce") ** 2
+                        df_use[target] = (
+                            pd.to_numeric(df_use[se_cand], errors="coerce") ** 2
+                        )
                     else:
                         # unexpected, but try copying numerically
                         df_use[target] = pd.to_numeric(df_use[se_cand], errors="coerce")
@@ -586,7 +667,12 @@ for r, row in enumerate(PANEL_GRID):
                 pairs.sort(key=lambda hl: _legend_sort_key(hl[1]))
                 h_sorted, l_sorted = zip(*pairs)
                 leg_models = ax.legend(
-                    h_sorted, l_sorted, fontsize=11, loc="upper left", frameon=False, ncols=2
+                    h_sorted,
+                    l_sorted,
+                    fontsize=11,
+                    loc="upper left",
+                    frameon=False,
+                    ncols=2,
                 )
             if base_handles:
                 leg_base = ax.legend(
@@ -866,7 +952,7 @@ plt.show()
 #
 # ---- Shared helpers for FAIR/CLIM-FAIR coverage (IBTrACS-denominator & raw-model coverage)
 
-IBTRACS_DIR = os.path.join(os.curdir, "data", "ibtracs")
+IBTRACS_DIR = args.ibtracs_path
 IBTRACS_2023_CSV = os.path.join(IBTRACS_DIR, "IBTrACS_2023.csv")
 
 
@@ -925,34 +1011,35 @@ def _build_ib_denom_from_df(ib_df: pd.DataFrame, leads=EXPLICIT_LEADS) -> pd.Ser
         try:
             dt = dt.dt.tz_localize(None)
         except Exception:
-            # already naive
             pass
     dt = dt.dt.floor("h")
     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
 
-    # Convert to integer hours since epoch for fast membership tests
     counts: dict[float, int] = {}
-    lead_list = [int(l) for l in leads]
+    lead_timedeltas = [pd.Timedelta(hours=int(l)) for l in leads]
+    lead_hours = [float(int(l)) for l in leads]
 
     for sid, grp in df.groupby("SID", sort=False):
         h = grp["ISO_TIME"].drop_duplicates().sort_values()
-        # all 6-hourly timestamps available for this SID (vt can be any 6h)
-        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
-        h_int_all = h_int_all[h_int_all % 6 == 0]
-        hset = set(h_int_all.tolist())
+
+        # Keep only 6-hourly synoptic times (00, 06, 12, 18 UTC)
+        h_6h = h[h.dt.hour.isin([0, 6, 12, 18])]
+        hset = set(h_6h)
         if not hset:
             continue
-        # Restrict *initializations* to 00Z/12Z, but keep vt on full 6-hour grid
+
+        # Restrict initializations to 00Z/12Z if INIT_HOURS is defined
         if "INIT_HOURS" in globals() and INIT_HOURS:
-            t0_candidates = [t for t in h_int_all if (t % 24) in INIT_HOURS]
+            t0_candidates = [t for t in h_6h if t.hour in INIT_HOURS]
         else:
-            t0_candidates = list(h_int_all)
+            t0_candidates = list(h_6h)
         if not t0_candidates:
             continue
+
         for t0 in t0_candidates:
-            for lh in lead_list:
-                if (t0 + lh) in hset:
-                    counts[float(lh)] = counts.get(float(lh), 0) + 1
+            for td, lh in zip(lead_timedeltas, lead_hours):
+                if (t0 + td) in hset:
+                    counts[lh] = counts.get(lh, 0) + 1
 
     s = pd.Series(counts, dtype=float).sort_index()
     return s
@@ -991,28 +1078,29 @@ def _aligned_ib_denominator_for_model(
     if model_df is None or model_df.empty or ib_df is None or ib_df.empty:
         return pd.Series(dtype=float)
 
-    # normalize model times
+    # --- Normalize model times ---
     m = model_df.copy()
     for c in ("Initial Time", "Valid Time"):
         if c in m.columns:
             m[c] = pd.to_datetime(m[c], errors="coerce")
     m = m.dropna(subset=["SID", "Initial Time"]).copy()
-    # Use unique (SID, t0-hour) initializations in the model
+
     m["Initial Time"] = (
         m["Initial Time"]
         .dt.tz_localize(None, nonexistent="shift_forward", ambiguous="NaT")
         .dt.floor("h")
     )
-    m["Initial Time_hr"] = (
-        m["Initial Time"].astype("int64", copy=False) // 3_600_000_000_000
-    )
-    m = m[m["Initial Time_hr"] % 6 == 0]
-    # Restrict to synoptic hours 00Z/12Z
+
+    # Keep only 6-hourly synoptic times
+    m = m[m["Initial Time"].dt.hour.isin([0, 6, 12, 18])]
+
+    # Restrict to configured init hours (e.g. 00Z/12Z)
     if "INIT_HOURS" in globals() and INIT_HOURS:
         m = m[m["Initial Time"].dt.hour.isin(INIT_HOURS)]
-    model_t0 = set(zip(m["SID"], m["Initial Time_hr"].to_numpy()))
 
-    # normalize ibtracs times
+    model_t0 = set(zip(m["SID"], m["Initial Time"]))
+
+    # --- Normalize IBTrACS times ---
     df = ib_df.copy()
     dt = pd.to_datetime(df["ISO_TIME"], errors="coerce")
     if hasattr(dt.dt, "tz_localize"):
@@ -1024,26 +1112,33 @@ def _aligned_ib_denominator_for_model(
     df = df.assign(ISO_TIME=dt).dropna(subset=["ISO_TIME"]).copy()
 
     counts: dict[float, int] = {}
-    lead_list = [int(l) for l in leads]
+    lead_timedeltas = [pd.Timedelta(hours=int(l)) for l in leads]
+    lead_hours = [float(int(l)) for l in leads]
 
     for sid, grp in df.groupby("SID", sort=False):
         h = grp["ISO_TIME"].drop_duplicates().sort_values()
-        # all 6-hourly timestamps available for this SID (vt can be any 6h)
-        h_int_all = (h.astype("int64", copy=False) // 3_600_000_000_000).to_numpy()
-        h_int_all = h_int_all[h_int_all % 6 == 0]
-        if len(h_int_all) == 0:
+
+        # Keep only 6-hourly synoptic times
+        h_6h = h[h.dt.hour.isin([0, 6, 12, 18])]
+        if h_6h.empty:
             continue
-        hset = set(h_int_all.tolist())
-        # Only consider t0 that exist in the model for this SID, and keep them on 00/12Z
+        hset = set(h_6h)
+
+        # Only consider t0 that exist in the model for this SID
         t0_for_sid = [t0 for (s, t0) in model_t0 if s == sid]
+
+        # INIT_HOURS filter already applied above when building model_t0,
+        # but apply again if needed for safety
         if "INIT_HOURS" in globals() and INIT_HOURS:
-            t0_for_sid = [t0 for t0 in t0_for_sid if (t0 % 24) in INIT_HOURS]
+            t0_for_sid = [t0 for t0 in t0_for_sid if t0.hour in INIT_HOURS]
+
         if not t0_for_sid:
             continue
+
         for t0 in t0_for_sid:
-            for lh in lead_list:
-                if (t0 + lh) in hset:
-                    counts[float(lh)] = counts.get(float(lh), 0) + 1
+            for td, lh in zip(lead_timedeltas, lead_hours):
+                if (t0 + td) in hset:
+                    counts[lh] = counts.get(lh, 0) + 1
 
     return pd.Series(counts, dtype=float).sort_index()
 
@@ -1590,10 +1685,10 @@ if _persist_fair is not None:
 
     # Final layout, then add column/row group titles in figure coordinates
     fig2.suptitle(
-    "FAIR comparison — metrics on IBTrACS grid (missing values filled by persistence)",
-    fontsize=14,
-    y=0.98,
-)
+        "FAIR comparison — metrics on IBTrACS grid (missing values filled by persistence)",
+        fontsize=14,
+        y=0.98,
+    )
     fig2.tight_layout(rect=[0.04, 0.06, 0.98, 0.90])
 
     # --- Compute positions for column headers and vertical group labels
@@ -1786,7 +1881,7 @@ else:
 # --- TCBench scorecard (WeatherBench-style) ---
 
 # ==== CONFIG ====
-EVAL_DIR = os.path.join(os.curdir, "outputs")
+EVAL_DIR = args.eval_dir
 # Which metrics and labels to plot (one panel per metric)
 METRICS = [
     ("AE_wind", "Abs. Error vmax (kt)"),
@@ -1935,6 +2030,7 @@ def _order_rows_fnv3_last(index_list):
 
 models = _reorder_models_for_display(models)
 
+
 # Inject RI_CSI per‑lead values (from *_RI.csv) into each model dataframe so it shows up in the scorecard
 def _compute_ri_csi_series(df_ri: pd.DataFrame) -> pd.Series:
     """
@@ -1944,9 +2040,15 @@ def _compute_ri_csi_series(df_ri: pd.DataFrame) -> pd.Series:
     for c in ("Initial Time", "Valid Time"):
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce")
-    if "lead_hours" not in df.columns and {"Initial Time", "Valid Time"}.issubset(df.columns):
-        df["lead_hours"] = (df["Valid Time"] - df["Initial Time"]).dt.total_seconds() / 3600.0
-    col = "RI_CSI" if "RI_CSI" in df.columns else ("CSI" if "CSI" in df.columns else None)
+    if "lead_hours" not in df.columns and {"Initial Time", "Valid Time"}.issubset(
+        df.columns
+    ):
+        df["lead_hours"] = (
+            df["Valid Time"] - df["Initial Time"]
+        ).dt.total_seconds() / 3600.0
+    col = (
+        "RI_CSI" if "RI_CSI" in df.columns else ("CSI" if "CSI" in df.columns else None)
+    )
     if col is None or "lead_hours" not in df.columns:
         return pd.Series(dtype=float)
     s = (
@@ -1958,6 +2060,7 @@ def _compute_ri_csi_series(df_ri: pd.DataFrame) -> pd.Series:
     )
     s.index = s.index.astype(int)
     return s
+
 
 # Inject RI_CSI per‑lead values (from *_RI.csv) into each model dataframe so it shows up in the scorecard
 for pretty_label, fn in list(_MODEL_FILEMAP.items()):
@@ -2021,8 +2124,7 @@ model_files = [
 model_files = [
     f
     for f in model_files
-    if ("postprocessing" not in f.lower())
-    or any(k in f.lower() for k in _PPOST_KEYS)
+    if ("postprocessing" not in f.lower()) or any(k in f.lower() for k in _PPOST_KEYS)
 ]
 models = {"Persistence": persistence}
 for fn in sorted(model_files):
@@ -2193,7 +2295,7 @@ for ax, (base, title) in zip(
 fig_prob.suptitle(
     f"TCBench Scorecard — Probabilistic (CRPS), Test Year {TEST_YEAR} — Baseline: Persistence [BASE]",
     fontsize=16,
-    y=0.98
+    y=0.98,
 )
 """
 fig_prob.text(
@@ -2926,7 +3028,7 @@ for m in labels_bar:
     elif _is_google(m) or "fnv3" in ml:
         bar_colors.append(color_for("$\\it{FNV3}$"))
     else:
-        bar_colors.append(cmap(labels_bar.index(m) % 10))
+        bar_colors.append(color_for(m))  # cmap(labels_bar.index(m) % 10))
 
 figA, (ax_csi_bar, ax_pss_bar) = plt.subplots(
     1, 2, figsize=(12, max(4.8, 0.6 * len(disp))), sharey=True
@@ -3012,7 +3114,9 @@ _pairs = list(zip(legend_handles, legend_labels))
 _persist = [(h, l) for (h, l) in _pairs if "persistence" in str(l).lower()]
 _others = [(h, l) for (h, l) in _pairs if "persistence" not in str(l).lower()]
 _ordered = (_persist + _others) if (_persist or _others) else _pairs
-legend_handles, legend_labels = zip(*_ordered) if _ordered else (legend_handles, legend_labels)
+legend_handles, legend_labels = (
+    zip(*_ordered) if _ordered else (legend_handles, legend_labels)
+)
 
 figA.legend(
     legend_handles,
@@ -3026,6 +3130,7 @@ figA.legend(
 
 # figA.suptitle("Rapid Intensification — Overall Skill by Model", fontsize=14, y=0.98)
 figA.tight_layout(rect=[0, 0.08, 1, 0.88])
+figA.savefig("TCBench_RI_skill_overall.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
 
@@ -3054,7 +3159,8 @@ for lab in labels_curve:
         linewidth=1.6,
         markersize=3.5,
         label=pretty,
-        color=color_map_curve.get(lab, None),
+        color=color_for(lab),
+        # color=color_map_curve.get(lab, None),
     )
     # Force Persistence style (black dashed, thicker line)
     if "persistence" in str(lab).lower():
@@ -3087,7 +3193,8 @@ for lab in labels_curve:
         linewidth=1.6,
         markersize=3.5,
         label=pretty,
-        color=color_map_curve.get(lab, None),
+        color=color_for(lab),
+        # color=color_map_curve.get(lab, None),
     )
     # Force Persistence style (black dashed, thicker line)
     if "persistence" in str(lab).lower():
@@ -3137,7 +3244,10 @@ figB.suptitle(
 )
 """
 figB.tight_layout(rect=[0, 0.08, 1, 0.88])
+figB.savefig("TCBench_RI_skill_by_lead.pdf", format="pdf", bbox_inches="tight")
 plt.show()
+
+
 def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sort_key):
     """
     Plot RI CSI curves for all models on a single axes.
@@ -3150,7 +3260,9 @@ def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sor
     for model_name, series in results_dict.items():
         name_str = str(model_name)
         is_persist = "persistence" in name_str.lower()
-        display_label = "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
+        display_label = (
+            "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
+        )
 
         plot_kwargs = dict(marker="o", linewidth=1.8)
         if is_persist:
@@ -3158,7 +3270,9 @@ def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sor
         else:
             plot_kwargs.setdefault("color", color_for(display_label))
 
-        (h_line,) = ax.plot(series.index, series.values, label=display_label, **plot_kwargs)
+        (h_line,) = ax.plot(
+            series.index, series.values, label=display_label, **plot_kwargs
+        )
         plotted.append((h_line, display_label, is_persist))
 
     # ---- Legend: put persistence first, then all others sorted by the provided key
@@ -3168,7 +3282,9 @@ def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sor
 
         # Sort "others" by legend sort key if provided
         if other_items:
-            other_items.sort(key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1])
+            other_items.sort(
+                key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1]
+            )
 
         ordered = persist_items + other_items
 
@@ -3182,9 +3298,12 @@ def plot_ri_overall(ax, results_dict, pretty_curve_label, color_for, _legend_sor
             ordered_unique.append((h, lbl))
 
         handles_sorted, labels_sorted = zip(*ordered_unique)
-        ax.legend(handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left")
+        ax.legend(
+            handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left"
+        )
     else:
         ax.legend(frameon=False, loc="upper left")
+
 
 def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sort_key):
     """
@@ -3197,7 +3316,9 @@ def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sor
     for model_name, series in results_dict.items():
         name_str = str(model_name)
         is_persist = "persistence" in name_str.lower()
-        display_label = "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
+        display_label = (
+            "Persistence [BASE]" if is_persist else pretty_curve_label(name_str)
+        )
 
         plot_kwargs = dict(marker="o", linewidth=1.8)
         if is_persist:
@@ -3205,7 +3326,9 @@ def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sor
         else:
             plot_kwargs.setdefault("color", color_for(display_label))
 
-        (h_line,) = ax.plot(series.index, series.values, label=display_label, **plot_kwargs)
+        (h_line,) = ax.plot(
+            series.index, series.values, label=display_label, **plot_kwargs
+        )
         plotted.append((h_line, display_label, is_persist))
 
     # ---- Legend: persistence first, then others sorted
@@ -3214,7 +3337,9 @@ def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sor
         other_items = [(h, lbl) for (h, lbl, isp) in plotted if not isp]
 
         if other_items:
-            other_items.sort(key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1])
+            other_items.sort(
+                key=lambda hl: _legend_sort_key(hl[1]) if _legend_sort_key else hl[1]
+            )
 
         ordered = persist_items + other_items
 
@@ -3227,6 +3352,11 @@ def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sor
             ordered_unique.append((h, lbl))
 
         handles_sorted, labels_sorted = zip(*ordered_unique)
-        ax.legend(handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left")
+        ax.legend(
+            handles_sorted, labels_sorted, ncols=2, frameon=False, loc="upper left"
+        )
     else:
         ax.legend(frameon=False, loc="upper left")
+
+
+# %%

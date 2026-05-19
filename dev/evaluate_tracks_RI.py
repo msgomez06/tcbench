@@ -26,14 +26,18 @@ def _to_numeric(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
-def _dedupe_columns(df: pd.DataFrame, context: str = "", verbose: bool = False) -> pd.DataFrame:
+def _dedupe_columns(
+    df: pd.DataFrame, context: str = "", verbose: bool = False
+) -> pd.DataFrame:
     """Drop duplicated column labels (keep first) and optionally log them."""
     cols = pd.Series(df.columns)
     if cols.duplicated().any():
         if verbose:
             dups = list(cols[cols.duplicated(keep=False)])
-            print(f"[RI] Removing duplicated columns in {context}: {dups} (keeping first occurrence)")
-        df = df.loc[:, ~cols.duplicated(keep='first')]
+            print(
+                f"[RI] Removing duplicated columns in {context}: {dups} (keeping first occurrence)"
+            )
+        df = df.loc[:, ~cols.duplicated(keep="first")]
     return df
 
 
@@ -51,9 +55,13 @@ def _compute_ibtracs_RI(
     if verbose:
         print("[RI][DEBUG] _compute_ibtracs_RI: start")
         _debug_dupe_cols(ib, "IBTrACS (pre-assign)")
-        pre_helpers = [c for c in ["__ri_ref_time__", "__ri_ref_intensity__"] if c in ib.columns]
+        pre_helpers = [
+            c for c in ["__ri_ref_time__", "__ri_ref_intensity__"] if c in ib.columns
+        ]
         if pre_helpers:
-            print(f"[RI][DEBUG] IBTrACS already contains helper columns before assignment: {pre_helpers}")
+            print(
+                f"[RI][DEBUG] IBTrACS already contains helper columns before assignment: {pre_helpers}"
+            )
 
     # Ensure numeric wind
     ib["USA_WIND"] = _to_numeric(ib["USA_WIND"])
@@ -64,13 +72,14 @@ def _compute_ibtracs_RI(
     except Exception as e:
         print("[RI][DEBUG][ERROR] Failed assigning __ri_ref_time__ in IBTrACS")
         _debug_dupe_cols(ib, "IBTrACS at failure adding __ri_ref_time__")
-        print(f"[RI][DEBUG] Columns count: {len(ib.columns)} | First 25 columns: {list(ib.columns)[:25]}")
+        print(
+            f"[RI][DEBUG] Columns count: {len(ib.columns)} | First 25 columns: {list(ib.columns)[:25]}"
+        )
         raise
 
     # Build ref ONLY from the necessary source columns to avoid duplicating '__ri_ref_time__'
-    ref = (
-        ib.loc[:, ["SID", "ISO_TIME", "USA_WIND"]]
-          .rename(columns={"ISO_TIME": "__ri_ref_time__", "USA_WIND": "__ri_ref_intensity__"})
+    ref = ib.loc[:, ["SID", "ISO_TIME", "USA_WIND"]].rename(
+        columns={"ISO_TIME": "__ri_ref_time__", "USA_WIND": "__ri_ref_intensity__"}
     )
     if verbose:
         _debug_dupe_cols(ref, "IBTrACS ref (post-rename/subset)")
@@ -86,7 +95,9 @@ def _compute_ibtracs_RI(
     return ib.drop(columns=["__ri_ref_time__", "__ri_ref_intensity__"])
 
 
-def _build_temp_index(df: pd.DataFrame, time_col_init: str, time_col_valid: str) -> pd.Series:
+def _build_temp_index(
+    df: pd.DataFrame, time_col_init: str, time_col_valid: str
+) -> pd.Series:
     """
     temp_index = "<init> tau <lead_hours>"
     """
@@ -164,12 +175,18 @@ def evaluate_tracks_RI(
     # --- Select candidate files
     if select_files is None:
         candidates = [f for f in os.listdir(results_folder) if f.endswith(".csv")]
+
         def _skip(fname: str) -> bool:
             low = fname.lower()
-            return any(p in low for p in ("_ri", "_results", "ibtracs"))  # skip derived files & ibtracs
+            return any(
+                p in low for p in ("_ri", "_results", "ibtracs")
+            )  # skip derived files & ibtracs
+
         track_files = [f for f in candidates if not _skip(f)]
     else:
-        track_files = [select_files] if isinstance(select_files, str) else list(select_files)
+        track_files = (
+            [select_files] if isinstance(select_files, str) else list(select_files)
+        )
 
     out_map: Dict[str, str] = {}
 
@@ -198,7 +215,9 @@ def evaluate_tracks_RI(
         if ri_verbose:
             _debug_dupe_cols(df, f"input file {track_file} (post-dedupe)")
             if "__ri_ref_time__" in df.columns:
-                print(f"[RI][DEBUG] '__ri_ref_time__' already present in {track_file} BEFORE per-SID processing")
+                print(
+                    f"[RI][DEBUG] '__ri_ref_time__' already present in {track_file} BEFORE per-SID processing"
+                )
 
         # Basic sanity
         need = {"SID", "Initial Time", "Valid Time", "wind max"}
@@ -215,14 +234,18 @@ def evaluate_tracks_RI(
         df["wind max"] = _to_numeric(df["wind max"])
 
         # Determine if probabilistic via an 'ensemble' column
-        ensemble_col = next((c for c in df.columns if "ensemble" in str(c).lower()), None)
+        ensemble_col = next(
+            (c for c in df.columns if "ensemble" in str(c).lower()), None
+        )
 
         # Prepare output columns with correct dtypes
         df_out = df.copy()
         # Ensure boolean dtype to avoid pandas FutureWarning on assignment
         df_out["RI"] = pd.Series(False, index=df_out.index, dtype=bool)
         if keep_intensification:
-            df_out["intensification"] = pd.Series(np.nan, index=df_out.index, dtype=float)
+            df_out["intensification"] = pd.Series(
+                np.nan, index=df_out.index, dtype=float
+            )
 
         if ri_verbose:
             _debug_dupe_cols(df_out, f"df_out initial copy for {track_file}")
@@ -234,37 +257,58 @@ def evaluate_tracks_RI(
             if ri_verbose:
                 _debug_dupe_cols(df_sid, f"SID {sid} pre-ref_time assignment")
                 if "__ri_ref_time__" in df_sid.columns:
-                    print(f"[RI][DEBUG] '__ri_ref_time__' pre-exists in slice for SID {sid} BEFORE assignment")
+                    print(
+                        f"[RI][DEBUG] '__ri_ref_time__' pre-exists in slice for SID {sid} BEFORE assignment"
+                    )
 
             try:
                 # ref_time = Valid Time - RI_window
-                df_sid["__ri_ref_time__"] = df_sid["Valid Time"] - pd.Timedelta(hours=RI_window)
+                df_sid["__ri_ref_time__"] = df_sid["Valid Time"] - pd.Timedelta(
+                    hours=RI_window
+                )
             except Exception as e:
                 # Print detailed state and re-raise to preserve original failure behavior
-                print(f"[RI][DEBUG][ERROR] While assigning __ri_ref_time__ for SID {sid} in {track_file}")
-                print(f"[RI][DEBUG] Columns count: {len(df_sid.columns)} | Columns: {list(df_sid.columns)}")
+                print(
+                    f"[RI][DEBUG][ERROR] While assigning __ri_ref_time__ for SID {sid} in {track_file}"
+                )
+                print(
+                    f"[RI][DEBUG] Columns count: {len(df_sid.columns)} | Columns: {list(df_sid.columns)}"
+                )
                 _debug_dupe_cols(df_sid, f"SID {sid} at failure")
                 raise
 
             sid_ref = df_sid.copy()
             if ri_verbose and "temp_index" in sid_ref.columns:
-                print(f"[RI][DEBUG] 'temp_index' unexpectedly present in sid_ref before build for SID {sid}")
+                print(
+                    f"[RI][DEBUG] 'temp_index' unexpectedly present in sid_ref before build for SID {sid}"
+                )
 
-            sid_ref["temp_index"] = _build_temp_index(sid_ref, "Initial Time", "Valid Time")
+            sid_ref["temp_index"] = _build_temp_index(
+                sid_ref, "Initial Time", "Valid Time"
+            )
             if ensemble_col is not None:
-                sid_ref["temp_index"] = sid_ref["temp_index"] + " ens_idx " + sid_ref[ensemble_col].astype(str)
+                sid_ref["temp_index"] = (
+                    sid_ref["temp_index"]
+                    + " ens_idx "
+                    + sid_ref[ensemble_col].astype(str)
+                )
 
             if ri_verbose:
                 dup_temp = sid_ref["temp_index"].duplicated().any()
                 if dup_temp:
-                    print(f"[RI][DEBUG] Duplicate temp_index values within SID {sid} (this is expected when multiple leads share same key; merge should still be left-join safe)")
+                    print(
+                        f"[RI][DEBUG] Duplicate temp_index values within SID {sid} (this is expected when multiple leads share same key; merge should still be left-join safe)"
+                    )
 
             # temp index corresponding to the reference lead (i.e., (__ri_ref_time__ - Initial Time))
             df_sid["temp_index"] = (
                 _to_datetime(df_sid["Initial Time"]).dt.strftime("%Y-%m-%d %H:%M:%S")
                 + " tau "
                 + (
-                    (_to_datetime(df_sid["__ri_ref_time__"]) - _to_datetime(df_sid["Initial Time"]))
+                    (
+                        _to_datetime(df_sid["__ri_ref_time__"])
+                        - _to_datetime(df_sid["Initial Time"])
+                    )
                     .dt.total_seconds()
                     .div(3600.0)
                     .round()
@@ -273,18 +317,26 @@ def evaluate_tracks_RI(
                 )
             )
             if ensemble_col is not None:
-                df_sid["temp_index"] = df_sid["temp_index"] + " ens_idx " + df_sid[ensemble_col].astype(str)
+                df_sid["temp_index"] = (
+                    df_sid["temp_index"]
+                    + " ens_idx "
+                    + df_sid[ensemble_col].astype(str)
+                )
 
             # Merge self-reference "wind max ref"
             df_sid = df_sid.merge(
-                sid_ref[["temp_index", "wind max"]].rename(columns={"wind max": "wind max ref"}),
+                sid_ref[["temp_index", "wind max"]].rename(
+                    columns={"wind max": "wind max ref"}
+                ),
                 on="temp_index",
                 how="left",
                 suffixes=("", ""),
             )
 
             # For rows where __ri_ref_time__ == Initial Time, backfill from IBTrACS USA_WIND at that time
-            needs_ib = _to_datetime(df_sid["__ri_ref_time__"]) == _to_datetime(df_sid["Initial Time"])
+            needs_ib = _to_datetime(df_sid["__ri_ref_time__"]) == _to_datetime(
+                df_sid["Initial Time"]
+            )
             if needs_ib.any():
                 ib_ref_sid = ib_ri[ib_ri["SID"].astype(str) == str(sid)].rename(
                     columns={"ISO_TIME": "Valid Time"}
@@ -319,7 +371,9 @@ if __name__ == "__main__":
     # Optional CLI entry point for manual use
     import argparse
 
-    parser = argparse.ArgumentParser(description="Compute <name>_RI.csv for model tracks.")
+    parser = argparse.ArgumentParser(
+        description="Compute <name>_RI.csv for model tracks."
+    )
     parser.add_argument("--ibtracs_folder", type=str, required=True)
     parser.add_argument("--results_folder", type=str, required=True)
     parser.add_argument("--year", type=int, default=2023)
@@ -329,8 +383,11 @@ if __name__ == "__main__":
     parser.add_argument("--recompute", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
-        "--select_files", type=str, nargs="*", default=None,
-        help="Optional list of CSV filenames to process."
+        "--select_files",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Optional list of CSV filenames to process.",
     )
     args = parser.parse_args()
 
