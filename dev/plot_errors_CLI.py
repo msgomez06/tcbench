@@ -304,7 +304,57 @@ for base in NON_R2_BASES:
             )
 
 # Define color map keyed by forecast label using default color cycle
-colors = cycle(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+# Based on Martin Krzywinski's 15-color palette for "Designing for Color Blindness"
+# https://mk.bcgsc.ca/colorblind/palettes.mhtml#12-color-palette-for-colorbliness
+# COLORBLIND_COLORS = [
+#     "#68023F",  # Tyrian Purple
+#     "#008169", # Deep Sea
+#     "#EF0096",  # persian rose
+#     "#00DCB5", # aquamarine
+#     "#FFCFE2", # azalea
+#     "#003C86", # congress blue
+#     "#9400E6", # veronica
+#     "#009FFA", # bleu de france
+#     "#FF71FD", # shocking pink
+#     "#7DFFFA", # electric blue
+#     "#6A0213", # rosewood
+#     "#008607", # india green
+#     "#F60239", # tractor red
+#     "#00E307", # radioactive green
+#     "#FFDC3D", # gargoyle gas
+# ]
+# color_list = COLORBLIND_COLORS
+# colors = cycle(COLORBLIND_COLORS)
+
+MAX_DISTINCT = [
+    "#%02x%02x%02x" % (202, 82, 52),
+    "#%02x%02x%02x" % (30, 185, 164),
+    "#%02x%02x%02x" % (138, 50, 49),
+    "#%02x%02x%02x" % (77, 60, 143),
+    "#%02x%02x%02x" % (60, 133, 78),
+    "#%02x%02x%02x" % (0, 115, 137),
+    "#%02x%02x%02x" % (171, 81, 186),
+    "#%02x%02x%02x" % (212, 142, 72),
+    "#%02x%02x%02x" % (131, 125, 46),
+    "#%02x%02x%02x" % (222, 133, 125),
+    "#%02x%02x%02x" % (205, 73, 118),
+    # "#%02x%02x%02x" % (222, 129, 194), Used for MT-LB (climatology inspired baseline)
+    "#%02x%02x%02x" % (166, 147, 218),
+    "#%02x%02x%02x" % (127, 50, 106),
+    "#%02x%02x%02x" % (85, 109, 188),
+    "#%02x%02x%02x" % (85, 168, 213),
+    "#%02x%02x%02x" % (114, 185, 85),
+    "#%02x%02x%02x" % (58, 86, 18),
+    "#%02x%02x%02x" % (191, 174, 71),
+    "#%02x%02x%02x" % (126, 76, 9),
+]
+color_list = MAX_DISTINCT
+colors = cycle(MAX_DISTINCT)
+
+# TAB_COLORS = [mpl.colors.to_hex(c) for c in mpl.colormaps["tab10"].colors]
+# color_list = TAB_COLORS
+# colors = cycle(TAB_COLORS)
+
 forecast_labels = sorted({lbl for base in stats for lbl in stats[base]})
 color_map = {lbl: col for lbl, col in zip(forecast_labels, colors)}
 
@@ -434,7 +484,7 @@ def _legend_sort_key(lbl: str):
 
 
 # --- Global consistent color mapping (same color per model everywhere)
-_COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+_COLOR_CYCLE = iter(color_list)
 _COLOR_MAP_GLOBAL: dict[str, str] = {}
 
 
@@ -452,7 +502,7 @@ def color_for(pretty_label: str) -> str:
         try:
             _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
         except StopIteration:
-            _COLOR_CYCLE = iter(mpl.rcParams["axes.prop_cycle"].by_key()["color"])
+            _COLOR_CYCLE = iter(color_list)
             _COLOR_MAP_GLOBAL[key] = next(_COLOR_CYCLE)
     return _COLOR_MAP_GLOBAL[key]
 
@@ -461,7 +511,11 @@ def color_for(pretty_label: str) -> str:
 # --- plotting
 # Baseline styles
 PERSIST_COLOR = "black"
-CLIM_COLOR = "cyan"  # distinct from persistence; dashed thick too
+CLIM_COLOR = "#%02x%02x%02x" % (
+    222,
+    129,
+    194,
+)  # "cyan"  # distinct from persistence; dashed thick too
 
 nrows = len(PANEL_GRID)
 ncols = len(PANEL_GRID[0])
@@ -2974,7 +3028,7 @@ for m in labels_bar:
     elif _is_google(m) or "fnv3" in ml:
         bar_colors.append(color_for("$\\it{FNV3}$"))
     else:
-        bar_colors.append(cmap(labels_bar.index(m) % 10))
+        bar_colors.append(color_for(m))  # cmap(labels_bar.index(m) % 10))
 
 figA, (ax_csi_bar, ax_pss_bar) = plt.subplots(
     1, 2, figsize=(12, max(4.8, 0.6 * len(disp))), sharey=True
@@ -3076,6 +3130,7 @@ figA.legend(
 
 # figA.suptitle("Rapid Intensification — Overall Skill by Model", fontsize=14, y=0.98)
 figA.tight_layout(rect=[0, 0.08, 1, 0.88])
+figA.savefig("TCBench_RI_skill_overall.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
 
@@ -3104,7 +3159,8 @@ for lab in labels_curve:
         linewidth=1.6,
         markersize=3.5,
         label=pretty,
-        color=color_map_curve.get(lab, None),
+        color=color_for(lab),
+        # color=color_map_curve.get(lab, None),
     )
     # Force Persistence style (black dashed, thicker line)
     if "persistence" in str(lab).lower():
@@ -3137,7 +3193,8 @@ for lab in labels_curve:
         linewidth=1.6,
         markersize=3.5,
         label=pretty,
-        color=color_map_curve.get(lab, None),
+        color=color_for(lab),
+        # color=color_map_curve.get(lab, None),
     )
     # Force Persistence style (black dashed, thicker line)
     if "persistence" in str(lab).lower():
@@ -3187,6 +3244,7 @@ figB.suptitle(
 )
 """
 figB.tight_layout(rect=[0, 0.08, 1, 0.88])
+figB.savefig("TCBench_RI_skill_by_lead.pdf", format="pdf", bbox_inches="tight")
 plt.show()
 
 
@@ -3299,3 +3357,6 @@ def plot_ri_by_lead(ax, results_dict, pretty_curve_label, color_for, _legend_sor
         )
     else:
         ax.legend(frameon=False, loc="upper left")
+
+
+# %%
